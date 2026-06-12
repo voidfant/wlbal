@@ -6,7 +6,8 @@ use std::{
     collections::HashMap,
     env,
     ffi::{c_char, c_double, c_int, CStr, CString},
-    path::PathBuf,
+    fs,
+    path::{Path, PathBuf},
     sync::{mpsc, Arc, Mutex},
     thread,
     time::Duration,
@@ -273,7 +274,7 @@ fn run_worker(
     api_hash: String,
     app: AppHandle,
 ) -> Result<(), String> {
-    let td = unsafe { TdJson::load()? };
+    let td = unsafe { TdJson::load(config.telegram.tdjson_path.trim())? };
     unsafe {
         let verbosity = CString::new(json!({ "@type": "setLogVerbosityLevel", "new_verbosity_level": 1 }).to_string())
             .map_err(|err| err.to_string())?;
@@ -284,7 +285,7 @@ fn run_worker(
     let mut pending: HashMap<String, mpsc::Sender<Result<Value, String>>> = HashMap::new();
     let mut request_id = 0u64;
 
-    send_raw(&td, client_id, json!({ "@type": "getOption", "name": "version" }))?;
+    send_raw(&td, client_id, json!({ "@type": "getAuthorizationState" }))?;
 
     loop {
         while let Ok(command) = command_rx.try_recv() {
@@ -328,6 +329,91 @@ fn run_worker(
         };
 
         if let Some(extra) = value.get("@extra").and_then(Value::as_str) {
+            if extra == "wlbal-set-tdlib-parameters" {
+                if value.get("@type").and_then(Value::as_str) == Some("error") {
+                    let error = response_error(&value, "unknown error");
+                    if error.contains("Parameters aren't specified") {
+                        let data_dir = telegram_data_dir();
+                        let database_dir = data_dir.join("database");
+                        let files_dir = data_dir.join("files");
+                        send_raw(
+                            &td,
+                            client_id,
+                            json!({
+                                "@type": "setTdlibParameters",
+                                "@extra": "wlbal-set-tdlib-parameters-nested",
+                                "parameters": tdlib_parameters(api_id, &api_hash, &database_dir, &files_dir),
+                            }),
+                        )?;
+                        set_snapshot(
+                            &snapshot,
+                            BridgeSnapshot {
+                                running: true,
+                                connected: false,
+                                auth_state: "authorizationStateWaitTdlibParameters".into(),
+                                message: "Retrying TDLib initialization with legacy parameter format...".into(),
+                            },
+                            &config,
+                            &app,
+                        );
+                        continue;
+                    }
+                    set_snapshot(
+                        &snapshot,
+                        BridgeSnapshot {
+                            running: true,
+                            connected: false,
+                            auth_state: "authorizationStateWaitTdlibParameters".into(),
+                            message: format!("TDLib parameters rejected: {error}"),
+                        },
+                        &config,
+                        &app,
+                    );
+                } else if value.get("@type").and_then(Value::as_str) == Some("ok") {
+                    send_raw(&td, client_id, json!({ "@type": "getAuthorizationState" }))?;
+                    set_snapshot(
+                        &snapshot,
+                        BridgeSnapshot {
+                            running: true,
+                            connected: false,
+                            auth_state: "authorizationStateWaitTdlibParameters".into(),
+                            message: "TDLib parameters accepted; opening local database...".into(),
+                        },
+                        &config,
+                        &app,
+                    );
+                }
+                continue;
+            }
+            if extra == "wlbal-set-tdlib-parameters-nested" {
+                if value.get("@type").and_then(Value::as_str) == Some("error") {
+                    set_snapshot(
+                        &snapshot,
+                        BridgeSnapshot {
+                            running: true,
+                            connected: false,
+                            auth_state: "authorizationStateWaitTdlibParameters".into(),
+                            message: format!("TDLib parameters rejected: {}", response_error(&value, "unknown error")),
+                        },
+                        &config,
+                        &app,
+                    );
+                } else if value.get("@type").and_then(Value::as_str) == Some("ok") {
+                    send_raw(&td, client_id, json!({ "@type": "getAuthorizationState" }))?;
+                    set_snapshot(
+                        &snapshot,
+                        BridgeSnapshot {
+                            running: true,
+                            connected: false,
+                            auth_state: "authorizationStateWaitTdlibParameters".into(),
+                            message: "TDLib parameters accepted; opening local database...".into(),
+                        },
+                        &config,
+                        &app,
+                    );
+                }
+                continue;
+            }
             if let Some(reply_tx) = pending.remove(extra) {
                 if value.get("@type").and_then(Value::as_str) == Some("error") {
                     let _ = reply_tx.send(Err(response_error(&value, "Telegram request failed")));
@@ -351,7 +437,7 @@ fn handle_update(
     app: &AppHandle,
     value: &Value,
 ) -> Result<(), String> {
-    if value.get("@type").and_then(Value::as_str) != Some("updateAuthorizationState") {
+    if auth_state_type(value).is_none() {
         if value.get("@type").and_then(Value::as_str) == Some("updateNewMessage") {
             if let Some(message) = value.get("message").and_then(parse_message) {
                 let _ = app.emit("telegram-message", &message);
@@ -360,22 +446,25 @@ fn handle_update(
         return Ok(());
     }
 
-    let auth_state = value
-        .get("authorization_state")
-        .and_then(|state| state.get("@type"))
-        .and_then(Value::as_str)
-        .unwrap_or("authorizationStateUnknown");
+    let auth_state = auth_state_type(value).unwrap_or("authorizationStateUnknown");
 
     match auth_state {
         "authorizationStateWaitTdlibParameters" => {
             let data_dir = telegram_data_dir();
+            let database_dir = data_dir.join("database");
+            let files_dir = data_dir.join("files");
+            fs::create_dir_all(&database_dir).map_err(|err| format!("Failed to create Telegram database directory: {err}"))?;
+            fs::create_dir_all(&files_dir).map_err(|err| format!("Failed to create Telegram files directory: {err}"))?;
             send_raw(
                 td,
                 client_id,
                 json!({
                     "@type": "setTdlibParameters",
-                    "database_directory": data_dir.join("database").to_string_lossy(),
-                    "files_directory": data_dir.join("files").to_string_lossy(),
+                    "@extra": "wlbal-set-tdlib-parameters",
+                    "use_test_dc": false,
+                    "database_directory": database_dir.to_string_lossy(),
+                    "files_directory": files_dir.to_string_lossy(),
+                    "database_encryption_key": "",
                     "use_file_database": true,
                     "use_chat_info_database": true,
                     "use_message_database": true,
@@ -498,12 +587,18 @@ unsafe impl Send for TdJson {}
 unsafe impl Sync for TdJson {}
 
 impl TdJson {
-    unsafe fn load() -> Result<Self, String> {
+    unsafe fn load(configured_path: &str) -> Result<Self, String> {
         let mut candidates = Vec::new();
+        if !configured_path.is_empty() {
+            candidates.push(configured_path.to_string());
+        }
         if let Ok(path) = env::var("WLBAL_TDJSON_PATH") {
             candidates.push(path);
         }
         candidates.extend([
+            "/opt/homebrew/lib/libtdjson.dylib".into(),
+            "/usr/local/lib/libtdjson.dylib".into(),
+            "/opt/local/lib/libtdjson.dylib".into(),
             "libtdjson.dylib".into(),
             "tdjson.dylib".into(),
             "libtdjson.so".into(),
@@ -559,12 +654,51 @@ fn set_snapshot(snapshot: &Arc<Mutex<BridgeSnapshot>>, next: BridgeSnapshot, con
     let _ = app.emit("telegram-state-changed", TelegramUpdatePayload { status });
 }
 
+fn auth_state_type(value: &Value) -> Option<&str> {
+    if value.get("@type").and_then(Value::as_str) == Some("updateAuthorizationState") {
+        return value
+            .get("authorization_state")
+            .and_then(|state| state.get("@type"))
+            .and_then(Value::as_str);
+    }
+
+    value
+        .get("@type")
+        .and_then(Value::as_str)
+        .filter(|kind| kind.starts_with("authorizationState"))
+}
+
 fn telegram_data_dir() -> PathBuf {
     config_dir().join("telegram")
 }
 
+fn tdlib_parameters(api_id: i32, api_hash: &str, database_dir: &Path, files_dir: &Path) -> Value {
+    json!({
+        "@type": "tdlibParameters",
+        "use_test_dc": false,
+        "database_directory": database_dir.to_string_lossy(),
+        "files_directory": files_dir.to_string_lossy(),
+        "database_encryption_key": "",
+        "use_file_database": true,
+        "use_chat_info_database": true,
+        "use_message_database": true,
+        "use_secret_chats": false,
+        "api_id": api_id,
+        "api_hash": api_hash,
+        "system_language_code": "en",
+        "device_model": "wlbal desktop",
+        "system_version": env::consts::OS,
+        "application_version": env!("CARGO_PKG_VERSION"),
+        "enable_storage_optimizer": true,
+        "ignore_file_names": false,
+    })
+}
+
 fn response_error(value: &Value, fallback: &str) -> String {
     if let Some(message) = value.get("message").and_then(Value::as_str) {
+        if message.contains("UPDATE_APP_TO_LOGIN") {
+            return "TDLib is too old for this Telegram login flow. Use a newer libtdjson build; phone-code login needs TDLib 1.8.11+.".into();
+        }
         return message.to_string();
     }
     if let Some(code) = value.get("code").and_then(Value::as_i64) {

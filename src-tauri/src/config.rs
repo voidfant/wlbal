@@ -60,6 +60,8 @@ pub struct TelegramConfig {
     #[serde(default)]
     pub api_hash: String,
     #[serde(default)]
+    pub tdjson_path: String,
+    #[serde(default)]
     pub work_allowed_chats: Vec<TelegramChatRule>,
 }
 
@@ -117,6 +119,7 @@ impl Default for TelegramConfig {
             block_official_clients_during_work: true,
             api_id: None,
             api_hash: String::new(),
+            tdjson_path: String::new(),
             work_allowed_chats: Vec::new(),
         }
     }

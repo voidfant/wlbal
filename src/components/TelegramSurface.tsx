@@ -102,6 +102,7 @@ export function TelegramSurface({
       const next = await invoke<TelegramStatus>("start_telegram_bridge", {
         apiId: config.telegram.api_id ?? null,
         apiHash: config.telegram.api_hash,
+        tdjsonPath: config.telegram.tdjson_path,
       });
       setStatus(next);
       setError(null);
@@ -345,6 +346,13 @@ function AuthPanel({
             value={config.telegram.api_hash}
             onChange={(event) => updateTelegram({ api_hash: event.target.value })}
             placeholder="API hash"
+            spellCheck={false}
+          />
+          <input
+            className="telegram-input"
+            value={config.telegram.tdjson_path}
+            onChange={(event) => updateTelegram({ tdjson_path: event.target.value })}
+            placeholder="/opt/homebrew/lib/libtdjson.dylib"
             spellCheck={false}
           />
           <button className="primary-action" onClick={startBridge}>Start Bridge</button>

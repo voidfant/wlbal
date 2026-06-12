@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Lock, MessageCircle, Minus, Plus, RefreshCw } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
@@ -56,10 +57,8 @@ export function TelegramManager({
 
   const refreshTelegram = async () => {
     try {
-      const [nextStatus, nextChats] = await Promise.all([
-        invoke<TelegramStatus>("get_telegram_status"),
-        invoke<TelegramChatSummary[]>("get_telegram_chats"),
-      ]);
+      const nextStatus = await invoke<TelegramStatus>("get_telegram_status");
+      const nextChats = await invoke<TelegramChatSummary[]>("get_telegram_chats");
       setStatus(nextStatus);
       setChats(nextChats);
       setError(null);
@@ -70,6 +69,13 @@ export function TelegramManager({
 
   useEffect(() => {
     refreshTelegram();
+    const stateChanged = listen<{ status: TelegramStatus }>("telegram-state-changed", (event) => {
+      setStatus(event.payload.status);
+      setError(null);
+    });
+    return () => {
+      stateChanged.then((off) => off());
+    };
   }, []);
 
   const updateTelegram = (patch: Partial<Config["telegram"]>) => {
@@ -81,6 +87,7 @@ export function TelegramManager({
       const nextStatus = await invoke<TelegramStatus>("start_telegram_bridge", {
         apiId: config.telegram.api_id ?? null,
         apiHash: config.telegram.api_hash,
+        tdjsonPath: config.telegram.tdjson_path,
       });
       setStatus(nextStatus);
       setError(null);
@@ -202,6 +209,13 @@ export function TelegramManager({
               value={config.telegram.api_hash}
               onChange={(event) => updateTelegram({ api_hash: event.target.value })}
               placeholder="API hash"
+              spellCheck={false}
+            />
+            <input
+              className="telegram-input"
+              value={config.telegram.tdjson_path}
+              onChange={(event) => updateTelegram({ tdjson_path: event.target.value })}
+              placeholder="/opt/homebrew/lib/libtdjson.dylib"
               spellCheck={false}
             />
           </div>

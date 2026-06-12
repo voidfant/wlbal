@@ -113,14 +113,18 @@ async fn get_telegram_status(state: State<'_, AppState>) -> Result<TelegramConne
 async fn start_telegram_bridge(
     api_id: Option<i32>,
     api_hash: Option<String>,
+    tdjson_path: Option<String>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<TelegramConnectionStatus, String> {
     let mut config = state.config.read().await.clone();
-    if api_id.is_some() || api_hash.is_some() {
+    if api_id.is_some() || api_hash.is_some() || tdjson_path.is_some() {
         config.telegram.api_id = api_id.or(config.telegram.api_id);
         if let Some(api_hash) = api_hash {
             config.telegram.api_hash = api_hash;
+        }
+        if let Some(tdjson_path) = tdjson_path {
+            config.telegram.tdjson_path = tdjson_path;
         }
         config::save_config_to_disk(&config).map_err(|err| err.to_string())?;
         *state.config.write().await = config.clone();
@@ -155,15 +159,28 @@ async fn telegram_check_password(password: String, state: State<'_, AppState>) -
 
 #[tauri::command]
 async fn get_telegram_chats(state: State<'_, AppState>) -> Result<Vec<TelegramChatSummary>, String> {
-    let selected_ids = state
-        .config
-        .read()
-        .await
+    let config = state.config.read().await.clone();
+    let status = state.telegram.status(&config);
+    let selected_ids = config
         .telegram
         .work_allowed_chats
         .iter()
         .map(|chat| chat.id.clone())
         .collect::<Vec<_>>();
+
+    if !status.connected {
+        return Ok(config
+            .telegram
+            .work_allowed_chats
+            .into_iter()
+            .map(|chat| TelegramChatSummary {
+                id: chat.id,
+                title: chat.title,
+                selected: true,
+            })
+            .collect());
+    }
+
     let bridge = state.telegram.clone();
     tokio::task::spawn_blocking(move || bridge.get_chats(&selected_ids, 100))
         .await

@@ -45,6 +45,7 @@ export type Config = {
     block_official_clients_during_work: boolean;
     api_id?: number | null;
     api_hash: string;
+    tdjson_path: string;
     work_allowed_chats: Array<{
       id: string;
       title: string;
@@ -96,6 +97,7 @@ const defaultConfig: Config = {
     block_official_clients_during_work: true,
     api_id: null,
     api_hash: "",
+    tdjson_path: "",
     work_allowed_chats: [],
   },
   override: {
