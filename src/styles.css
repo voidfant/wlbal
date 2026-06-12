@@ -1,0 +1,442 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  margin: 0;
+  background: #0e0e0e;
+}
+
+body {
+  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  letter-spacing: 0;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.app-titlebar {
+  padding-left: 96px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.nav-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  border: 1px solid transparent;
+  padding: 0 12px;
+  color: #8b8b8b;
+  font-size: 13px;
+  transition: color 160ms ease, border-color 160ms ease, background 160ms ease;
+}
+
+.nav-button:hover {
+  color: #f0f0f0;
+  background: #171717;
+}
+
+.nav-button-active {
+  color: #f0f0f0;
+  background: #1a1a1a;
+  border-color: #2a2a2a;
+}
+
+.nav-work {
+  box-shadow: inset 0 -2px 0 #e63946;
+}
+
+.nav-leisure {
+  box-shadow: inset 0 -2px 0 #2ec4b6;
+}
+
+.save-button,
+.primary-action,
+.secondary-action,
+.preset-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 38px;
+  border: 1px solid #2a2a2a;
+  padding: 0 13px;
+  font-size: 13px;
+  color: #f0f0f0;
+  background: #1a1a1a;
+  transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+
+.primary-action {
+  background: #e63946;
+  border-color: #e63946;
+  color: #0e0e0e;
+  font-weight: 700;
+}
+
+.secondary-action:hover,
+.save-button:hover,
+.preset-button:hover {
+  border-color: #666;
+  background: #202020;
+}
+
+.primary-action:hover {
+  transform: translateY(-1px);
+  background: #ff4b58;
+}
+
+.search-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 42px;
+  border: 1px solid #2a2a2a;
+  background: #121212;
+  padding: 0 12px;
+  color: #666;
+}
+
+.search-field input,
+.domain-input,
+.script-input,
+.telegram-input,
+.number-field input {
+  width: 100%;
+  border: 0;
+  outline: 0;
+  color: #f0f0f0;
+  background: transparent;
+}
+
+.domain-input {
+  min-height: 86px;
+  resize: vertical;
+  border: 1px solid #2a2a2a;
+  background: #121212;
+  padding: 12px;
+  line-height: 1.4;
+}
+
+.script-input {
+  min-height: 124px;
+  resize: vertical;
+  border: 1px solid #2a2a2a;
+  background: #121212;
+  padding: 12px;
+  color: #f0f0f0;
+  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.telegram-input {
+  min-width: 0;
+  height: 38px;
+  border: 1px solid #2a2a2a;
+  background: #111;
+  padding: 0 10px;
+  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.telegram-compose {
+  width: 100%;
+  min-height: 54px;
+  max-height: 140px;
+  resize: vertical;
+  border: 1px solid #2a2a2a;
+  outline: 0;
+  background: #121212;
+  padding: 12px;
+  color: #f0f0f0;
+  line-height: 1.4;
+}
+
+.app-row,
+.domain-row,
+.telegram-chat-row,
+.telegram-toggle-row,
+.select-row,
+.toggle-row,
+.number-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+  border: 1px solid #2a2a2a;
+  background: #1a1a1a;
+  padding: 8px 10px;
+}
+
+.app-row {
+  transition: border-color 140ms ease, transform 140ms ease, background 140ms ease;
+}
+
+.app-row:hover {
+  border-color: #555;
+  transform: translateX(2px);
+}
+
+.app-glyph {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  background: #0e0e0e;
+  color: #cfcfcf;
+  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 10px;
+}
+
+.icon-button {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  border: 1px solid #2a2a2a;
+  color: #d0d0d0;
+  background: #111;
+}
+
+.icon-button:hover {
+  border-color: #666;
+}
+
+.app-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(42px, 1fr));
+  gap: 4px;
+  flex: 0 0 92px;
+}
+
+.rule-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 0;
+  height: 24px;
+  border: 1px solid #2a2a2a;
+  background: #111;
+  color: #9a9a9a;
+  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 10px;
+}
+
+.rule-chip:hover {
+  border-color: #666;
+  color: #f0f0f0;
+}
+
+.rule-chip-active {
+  border-color: #2ec4b6;
+  color: #2ec4b6;
+}
+
+.domain-row {
+  justify-content: space-between;
+  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 13px;
+}
+
+.telegram-chat-row,
+.telegram-toggle-row {
+  justify-content: space-between;
+}
+
+.telegram-toggle-row {
+  color: #d0d0d0;
+  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.telegram-toggle-row input {
+  width: 18px;
+  height: 18px;
+  accent-color: #2ec4b6;
+}
+
+.telegram-chat-select {
+  display: flex;
+  width: 100%;
+  min-height: 52px;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #2a2a2a;
+  background: #1a1a1a;
+  padding: 9px 10px;
+  color: #f0f0f0;
+  text-align: left;
+}
+
+.telegram-chat-select:hover {
+  border-color: #666;
+}
+
+.telegram-chat-select-active {
+  border-color: #2ec4b6;
+  box-shadow: inset 3px 0 0 #2ec4b6;
+}
+
+.telegram-chat-select small {
+  color: #666;
+  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.telegram-message {
+  max-width: min(680px, 86%);
+  border: 1px solid #2a2a2a;
+  background: #171717;
+  padding: 10px 12px;
+}
+
+.telegram-message-outgoing {
+  margin-left: auto;
+  border-color: rgba(46, 196, 182, 0.55);
+  background: #10211f;
+}
+
+.select-row {
+  flex-direction: column;
+  align-items: flex-start;
+  color: #f0f0f0;
+  text-align: left;
+}
+
+.select-row small {
+  max-width: 100%;
+  overflow: hidden;
+  color: #666;
+  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.select-row-active {
+  border-color: #e63946;
+  box-shadow: inset 3px 0 0 #e63946;
+}
+
+.code-chip {
+  border: 1px solid #2a2a2a;
+  background: #1a1a1a;
+  padding: 2px 6px;
+  color: #f0f0f0;
+}
+
+.setting-label {
+  margin-bottom: 10px;
+  color: #9a9a9a;
+  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid #2a2a2a;
+  background: #121212;
+}
+
+.segmented button {
+  min-width: 132px;
+  height: 42px;
+  border-right: 1px solid #2a2a2a;
+  color: #9a9a9a;
+}
+
+.segmented button:last-child {
+  border-right: 0;
+}
+
+.segmented button.active {
+  color: #0e0e0e;
+  background: #2ec4b6;
+  font-weight: 700;
+}
+
+.number-field {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.number-field span,
+.toggle-row span {
+  color: #9a9a9a;
+  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.number-field input {
+  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 28px;
+}
+
+.toggle-row {
+  justify-content: space-between;
+}
+
+.toggle-row input {
+  width: 18px;
+  height: 18px;
+  accent-color: #2ec4b6;
+}
+
+.phase-flash {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  pointer-events: none;
+  animation: flash 420ms ease-out both;
+}
+
+.animate-enter {
+  animation: enter 260ms ease-out both;
+}
+
+@keyframes flash {
+  0% {
+    opacity: 0.86;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

@@ -1,0 +1,73 @@
+# Dependencies
+node_modules/
+
+# Package managers
+.pnpm-store/
+.npm/
+.yarn/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.yarn/install-state.gz
+
+# Build outputs
+dist/
+build/
+out/
+
+# Vite
+vite.svg
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Tauri
+src-tauri/target/
+src-tauri/gen/
+
+# Rust
+Cargo.lock
+
+# Tauri local configuration
+src-tauri/.cargo/
+src-tauri/.rustup/
+
+# Generated binaries
+*.exe
+*.dll
+*.so
+*.dylib
+*.app
+
+# Coverage
+coverage/
+
+# Cache
+.cache/
+.parcel-cache/
+.eslintcache
+
+# Temporary files
+tmp/
+temp/
+
+# Tauri updater artifacts
+latest.json
+*.sig
