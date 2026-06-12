@@ -54,6 +54,17 @@ pub struct TelegramMedia {
     pub file_id: Option<i64>,
     pub file_name: Option<String>,
     pub mime_type: Option<String>,
+    pub local_path: Option<String>,
+    pub downloaded: bool,
+    pub size: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TelegramDownloadedFile {
+    pub file_id: i64,
+    pub local_path: Option<String>,
+    pub downloaded: bool,
+    pub size: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,6 +78,7 @@ pub struct TelegramMessage {
     pub text: String,
     pub media: Option<TelegramMedia>,
     pub reply_to_message_id: Option<String>,
+    pub reply_to_sender: Option<String>,
     pub forward_label: Option<String>,
     pub reactions: Vec<String>,
 }
@@ -74,6 +86,19 @@ pub struct TelegramMessage {
 #[derive(Debug, Clone, Serialize)]
 pub struct TelegramUpdatePayload {
     pub status: TelegramConnectionStatus,
+}
+
+#[derive(Debug, Clone)]
+enum TelegramSender {
+    User(i64),
+    Chat(String),
+}
+
+#[derive(Debug, Clone, Default)]
+struct SenderCache {
+    users: HashMap<i64, String>,
+    chats: HashMap<String, String>,
+    message_senders: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -260,9 +285,13 @@ impl TelegramBridge {
                 title,
                 unread_count: chat.get("unread_count").and_then(Value::as_i64).unwrap_or_default(),
                 is_forum: chat
-                    .get("type")
-                    .and_then(|kind| kind.get("is_forum"))
+                    .get("is_forum")
                     .and_then(Value::as_bool)
+                    .or_else(|| {
+                        chat.get("type")
+                            .and_then(|kind| kind.get("is_forum"))
+                            .and_then(Value::as_bool)
+                    })
                     .unwrap_or(false),
             });
         }
@@ -288,11 +317,22 @@ impl TelegramBridge {
         Ok(topics
             .iter()
             .filter_map(|topic| {
-                let id = topic.get("info").or_else(|| Some(topic))?.get("forum_topic_id").or_else(|| topic.get("id"))?.as_i64()?;
+                let info = topic.get("info").unwrap_or(topic);
+                let id = info
+                    .get("forum_topic_id")
+                    .or_else(|| info.get("id"))
+                    .or_else(|| info.get("message_thread_id"))
+                    .or_else(|| topic.get("forum_topic_id"))
+                    .or_else(|| topic.get("id"))
+                    .or_else(|| topic.get("message_thread_id"))
+                    .and_then(Value::as_i64)?;
                 let title = topic
                     .get("info")
-                    .or_else(|| Some(topic))?
+                    .unwrap_or(topic)
                     .get("name")
+                    .or_else(|| info.get("title"))
+                    .or_else(|| topic.get("name"))
+                    .or_else(|| topic.get("title"))
                     .and_then(Value::as_str)
                     .unwrap_or("Topic")
                     .to_string();
@@ -311,13 +351,23 @@ impl TelegramBridge {
     pub fn get_messages(&self, chat_id: String, topic_id: Option<i64>, from_message_id: i64, limit: i32) -> Result<Vec<TelegramMessage>, String> {
         let response = if let Some(topic_id) = topic_id {
             self.request(json!({
-                "@type": "getMessageThreadHistory",
+                "@type": "getForumTopicHistory",
                 "chat_id": chat_id,
-                "message_id": topic_id,
+                "forum_topic_id": topic_id,
                 "from_message_id": from_message_id,
                 "offset": 0,
                 "limit": limit.clamp(1, 100),
-            }))?
+            }))
+            .or_else(|_| {
+                self.request(json!({
+                    "@type": "getMessageThreadHistory",
+                    "chat_id": chat_id,
+                    "message_id": topic_id,
+                    "from_message_id": from_message_id,
+                    "offset": 0,
+                    "limit": limit.clamp(1, 100),
+                }))
+            })?
         } else {
             self.request(json!({
                 "@type": "getChatHistory",
@@ -333,7 +383,43 @@ impl TelegramBridge {
             .and_then(Value::as_array)
             .ok_or_else(|| response_error(&response, "Telegram did not return message history"))?;
 
-        Ok(messages.iter().filter_map(parse_message).collect())
+        Ok(self.parse_messages(messages))
+    }
+
+    pub fn search_messages(&self, chat_id: String, topic_id: Option<i64>, query: String, from_message_id: i64, limit: i32) -> Result<Vec<TelegramMessage>, String> {
+        let response = self.request(json!({
+            "@type": "searchChatMessages",
+            "chat_id": chat_id,
+            "topic_id": topic_id.map(|id| json!({ "@type": "messageTopicForum", "forum_topic_id": id })),
+            "query": query,
+            "sender_id": null,
+            "from_message_id": from_message_id,
+            "offset": 0,
+            "limit": limit.clamp(1, 100),
+            "filter": null,
+        }))?;
+        let messages = response
+            .get("messages")
+            .and_then(Value::as_array)
+            .ok_or_else(|| response_error(&response, "Telegram did not return search results"))?;
+
+        Ok(self.parse_messages(messages))
+    }
+
+    pub fn download_file(&self, file_id: i64) -> Result<TelegramDownloadedFile, String> {
+        let response = self.request(json!({
+            "@type": "downloadFile",
+            "file_id": file_id,
+            "priority": 32,
+            "offset": 0,
+            "limit": 0,
+            "synchronous": true,
+        }))?;
+        let file = telegram_file(&response).ok_or_else(|| response_error(&response, "Telegram did not return the downloaded file"))?;
+        if !file.downloaded || file.local_path.as_deref().unwrap_or_default().is_empty() {
+            return Err("Telegram did not finish downloading the file".into());
+        }
+        Ok(file)
     }
 
     pub fn send_message(&self, chat_id: String, topic_id: Option<i64>, reply_to_message_id: Option<String>, text: String) -> Result<TelegramMessage, String> {
@@ -363,13 +449,23 @@ impl TelegramBridge {
                 "clear_draft": true,
             },
         }))?;
-        parse_message(&response).ok_or_else(|| response_error(&response, "Telegram did not return the sent message"))
+        let mut message = parse_message(&response)
+            .ok_or_else(|| response_error(&response, "Telegram did not return the sent message"))?;
+        if let Some(sender) = self.resolve_sender_name(&response) {
+            message.sender = sender;
+        }
+        if let Some(reply_id) = message.reply_to_message_id.clone() {
+            let mut names = HashMap::new();
+            message.reply_to_sender = self.resolve_message_sender_name(&message.chat_id, &reply_id, &mut names);
+        }
+        Ok(message)
     }
 
-    pub fn forward_message(&self, chat_id: String, from_chat_id: String, message_id: String) -> Result<Vec<TelegramMessage>, String> {
+    pub fn forward_message(&self, chat_id: String, topic_id: Option<i64>, from_chat_id: String, message_id: String) -> Result<Vec<TelegramMessage>, String> {
         let response = self.request(json!({
             "@type": "forwardMessages",
             "chat_id": chat_id,
+            "topic_id": topic_id.map(|id| json!({ "@type": "messageTopicForum", "forum_topic_id": id })),
             "from_chat_id": from_chat_id,
             "message_ids": [message_id.parse::<i64>().map_err(|_| "Invalid message id".to_string())?],
             "options": null,
@@ -381,7 +477,7 @@ impl TelegramBridge {
             .get("messages")
             .and_then(Value::as_array)
             .ok_or_else(|| response_error(&response, "Telegram did not return forwarded messages"))?;
-        Ok(messages.iter().filter_map(parse_message).collect())
+        Ok(self.parse_messages(messages))
     }
 
     pub fn add_reaction(&self, chat_id: String, message_id: String, emoji: String) -> Result<(), String> {
@@ -427,6 +523,87 @@ impl TelegramBridge {
             .recv_timeout(Duration::from_secs(20))
             .map_err(|_| "Timed out waiting for Telegram".to_string())?
     }
+
+    fn parse_messages(&self, values: &[Value]) -> Vec<TelegramMessage> {
+        let mut names = HashMap::new();
+        let mut messages = values
+            .iter()
+            .filter_map(|value| {
+                let mut message = parse_message(value)?;
+                if let Some(sender) = self.resolve_sender_name_cached(value, &mut names) {
+                    message.sender = sender;
+                }
+                Some(message)
+            })
+            .collect::<Vec<_>>();
+
+        let mut message_senders = messages
+            .iter()
+            .map(|message| (message.id.clone(), message.sender.clone()))
+            .collect::<HashMap<_, _>>();
+        for message in &mut messages {
+            let Some(reply_id) = message.reply_to_message_id.clone() else {
+                continue;
+            };
+            if let Some(sender) = message_senders.get(&reply_id).cloned() {
+                message.reply_to_sender = Some(sender);
+                continue;
+            }
+            if let Some(sender) = self.resolve_message_sender_name(&message.chat_id, &reply_id, &mut names) {
+                message.reply_to_sender = Some(sender.clone());
+                message_senders.insert(reply_id, sender);
+            }
+        }
+        messages
+    }
+
+    fn resolve_sender_name_cached(&self, value: &Value, names: &mut HashMap<String, String>) -> Option<String> {
+        let sender = message_sender(value)?;
+        let key = sender_cache_key(&sender);
+        if let Some(name) = names.get(&key) {
+            return Some(name.clone());
+        }
+        let name = self.resolve_sender(sender).ok()?;
+        names.insert(key, name.clone());
+        Some(name)
+    }
+
+    fn resolve_sender_name(&self, value: &Value) -> Option<String> {
+        self.resolve_sender(message_sender(value)?).ok()
+    }
+
+    fn resolve_message_sender_name(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        names: &mut HashMap<String, String>,
+    ) -> Option<String> {
+        let message = self.request(json!({
+            "@type": "getMessage",
+            "chat_id": chat_id,
+            "message_id": message_id.parse::<i64>().ok()?,
+        })).ok()?;
+        self.resolve_sender_name_cached(&message, names)
+    }
+
+    fn resolve_sender(&self, sender: TelegramSender) -> Result<String, String> {
+        match sender {
+            TelegramSender::User(user_id) => {
+                let user = self.request(json!({
+                    "@type": "getUser",
+                    "user_id": user_id,
+                }))?;
+                Ok(user_display_name(&user))
+            }
+            TelegramSender::Chat(chat_id) => {
+                let chat = self.request(json!({
+                    "@type": "getChat",
+                    "chat_id": chat_id,
+                }))?;
+                Ok(chat_display_name(&chat))
+            }
+        }
+    }
 }
 
 fn run_worker(
@@ -446,6 +623,7 @@ fn run_worker(
 
     let client_id = unsafe { (td.create_client_id)() };
     let mut pending: HashMap<String, mpsc::Sender<Result<Value, String>>> = HashMap::new();
+    let mut senders = SenderCache::default();
     let mut request_id = 0u64;
 
     send_raw(&td, client_id, json!({ "@type": "getAuthorizationState" }))?;
@@ -601,7 +779,7 @@ fn run_worker(
             }
         }
 
-        handle_update(&td, client_id, &snapshot, &config, api_id, &api_hash, &app, &value)?;
+        handle_update(&td, client_id, &snapshot, &config, api_id, &api_hash, &app, &mut senders, &value)?;
     }
 }
 
@@ -613,14 +791,34 @@ fn handle_update(
     api_id: i32,
     api_hash: &str,
     app: &AppHandle,
+    senders: &mut SenderCache,
     value: &Value,
 ) -> Result<(), String> {
     if auth_state_type(value).is_none() {
+        update_sender_cache(senders, value);
         if value.get("@type").and_then(Value::as_str) == Some("updateNewMessage") {
-            if let Some(message) = value.get("message").and_then(parse_message) {
-                if !message.outgoing {
-                    show_notification(&app, &format!("New Telegram message: {}", preview_text(&message)));
+            if let Some(mut message) = value.get("message").and_then(parse_message) {
+                if let Some(sender) = value
+                    .get("message")
+                    .and_then(|message| sender_name_from_cache(message, senders))
+                {
+                    message.sender = sender;
                 }
+                if let Some(reply_id) = &message.reply_to_message_id {
+                    message.reply_to_sender = senders
+                        .message_senders
+                        .get(&message_cache_key(&message.chat_id, reply_id))
+                        .cloned();
+                }
+                if !message.outgoing && is_allowed_message(config, &message) {
+                    show_notification(
+                        &app,
+                        &format!("{}: {}", message.sender, preview_text(&message)),
+                    );
+                }
+                senders
+                    .message_senders
+                    .insert(message_cache_key(&message.chat_id, &message.id), message.sender.clone());
                 let _ = app.emit("telegram-message", &message);
             }
         }
@@ -901,6 +1099,96 @@ fn json_id(value: &Value) -> Option<String> {
     None
 }
 
+fn message_sender(value: &Value) -> Option<TelegramSender> {
+    let sender = value.get("sender_id")?;
+    match sender.get("@type").and_then(Value::as_str)? {
+        "messageSenderUser" => sender
+            .get("user_id")
+            .and_then(Value::as_i64)
+            .map(TelegramSender::User),
+        "messageSenderChat" => sender
+            .get("chat_id")
+            .and_then(json_id)
+            .map(TelegramSender::Chat),
+        _ => None,
+    }
+}
+
+fn sender_cache_key(sender: &TelegramSender) -> String {
+    match sender {
+        TelegramSender::User(id) => format!("user:{id}"),
+        TelegramSender::Chat(id) => format!("chat:{id}"),
+    }
+}
+
+fn message_cache_key(chat_id: &str, message_id: &str) -> String {
+    format!("{chat_id}:{message_id}")
+}
+
+fn sender_name_from_cache(value: &Value, senders: &SenderCache) -> Option<String> {
+    match message_sender(value)? {
+        TelegramSender::User(id) => senders.users.get(&id).cloned(),
+        TelegramSender::Chat(id) => senders.chats.get(&id).cloned(),
+    }
+}
+
+fn update_sender_cache(senders: &mut SenderCache, value: &Value) {
+    match value.get("@type").and_then(Value::as_str) {
+        Some("updateUser") => {
+            if let Some(user) = value.get("user") {
+                if let Some(id) = user.get("id").and_then(Value::as_i64) {
+                    senders.users.insert(id, user_display_name(user));
+                }
+            }
+        }
+        Some("updateChat") => {
+            if let Some(chat) = value.get("chat") {
+                if let Some(id) = chat.get("id").and_then(json_id) {
+                    senders.chats.insert(id, chat_display_name(chat));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn user_display_name(user: &Value) -> String {
+    let first = user
+        .get("first_name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let last = user
+        .get("last_name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let full = [first, last]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !full.is_empty() {
+        return full;
+    }
+    if let Some(username) = user.get("username").and_then(Value::as_str).filter(|name| !name.is_empty()) {
+        return format!("@{username}");
+    }
+    user.get("id")
+        .and_then(json_id)
+        .map(|id| format!("User {id}"))
+        .unwrap_or_else(|| "User".into())
+}
+
+fn chat_display_name(chat: &Value) -> String {
+    chat.get("title")
+        .and_then(Value::as_str)
+        .filter(|title| !title.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| chat.get("id").and_then(json_id).map(|id| format!("Chat {id}")))
+        .unwrap_or_else(|| "Chat".into())
+}
+
 fn parse_message(value: &Value) -> Option<TelegramMessage> {
     let id = value.get("id").and_then(json_id)?;
     let chat_id = value.get("chat_id").and_then(json_id)?;
@@ -909,11 +1197,11 @@ fn parse_message(value: &Value) -> Option<TelegramMessage> {
         .and_then(|topic| topic.get("forum_topic_id").or_else(|| topic.get("message_thread_id")).or_else(|| topic.get("id")))
         .and_then(Value::as_i64)
         .or_else(|| value.get("message_thread_id").and_then(Value::as_i64));
-    let sender = value
-        .get("sender_id")
-        .and_then(|sender| sender.get("@type").and_then(Value::as_str))
-        .unwrap_or("sender")
-        .replace("messageSender", "");
+    let sender = match message_sender(value) {
+        Some(TelegramSender::User(id)) => format!("User {id}"),
+        Some(TelegramSender::Chat(id)) => format!("Chat {id}"),
+        None => "Sender".into(),
+    };
     let text = message_text(value);
     Some(TelegramMessage {
         id,
@@ -928,6 +1216,7 @@ fn parse_message(value: &Value) -> Option<TelegramMessage> {
             .get("reply_to")
             .and_then(|reply| reply.get("message_id").or_else(|| reply.get("origin_message_id")))
             .and_then(json_id),
+        reply_to_sender: None,
         forward_label: value.get("forward_info").map(forward_label),
         reactions: message_reactions(value),
     })
@@ -982,6 +1271,28 @@ fn message_media(value: &Value) -> Option<TelegramMedia> {
                 .and_then(Value::as_i64),
             file_name: None,
             mime_type: Some("image/jpeg".into()),
+            local_path: content
+                .get("photo")
+                .and_then(|photo| photo.get("sizes"))
+                .and_then(Value::as_array)
+                .and_then(|sizes| sizes.last())
+                .and_then(|size| size.get("photo"))
+                .and_then(file_local_path),
+            downloaded: content
+                .get("photo")
+                .and_then(|photo| photo.get("sizes"))
+                .and_then(Value::as_array)
+                .and_then(|sizes| sizes.last())
+                .and_then(|size| size.get("photo"))
+                .and_then(file_downloaded)
+                .unwrap_or(false),
+            size: content
+                .get("photo")
+                .and_then(|photo| photo.get("sizes"))
+                .and_then(Value::as_array)
+                .and_then(|sizes| sizes.last())
+                .and_then(|size| size.get("photo"))
+                .and_then(file_size),
         }),
         "messageVideo" => media_from_file(content.get("video"), "video"),
         "messageDocument" => media_from_file(content.get("document"), "document"),
@@ -998,7 +1309,43 @@ fn media_from_file(value: Option<&Value>, kind: &str) -> Option<TelegramMedia> {
         file_id: value.get(kind).or_else(|| value.get("file")).and_then(|file| file.get("id")).and_then(Value::as_i64),
         file_name: value.get("file_name").and_then(Value::as_str).map(str::to_string),
         mime_type: value.get("mime_type").and_then(Value::as_str).map(str::to_string),
+        local_path: value.get(kind).or_else(|| value.get("file")).and_then(file_local_path),
+        downloaded: value.get(kind).or_else(|| value.get("file")).and_then(file_downloaded).unwrap_or(false),
+        size: value.get(kind).or_else(|| value.get("file")).and_then(file_size),
     })
+}
+
+fn telegram_file(value: &Value) -> Option<TelegramDownloadedFile> {
+    let file_id = value.get("id").and_then(Value::as_i64)?;
+    Some(TelegramDownloadedFile {
+        file_id,
+        local_path: file_local_path(value),
+        downloaded: file_downloaded(value).unwrap_or(false),
+        size: file_size(value),
+    })
+}
+
+fn file_local_path(value: &Value) -> Option<String> {
+    value
+        .get("local")
+        .and_then(|local| local.get("path"))
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+}
+
+fn file_downloaded(value: &Value) -> Option<bool> {
+    value
+        .get("local")
+        .and_then(|local| local.get("is_downloading_completed"))
+        .and_then(Value::as_bool)
+}
+
+fn file_size(value: &Value) -> Option<i64> {
+    value
+        .get("size")
+        .or_else(|| value.get("expected_size"))
+        .and_then(Value::as_i64)
 }
 
 fn forward_label(value: &Value) -> String {
@@ -1040,6 +1387,12 @@ fn preview_text(message: &TelegramMessage) -> String {
     } else {
         "[message]".into()
     }
+}
+
+fn is_allowed_message(config: &Config, message: &TelegramMessage) -> bool {
+    config.telegram.work_allowed_chats.iter().any(|rule| {
+        rule.id == message.chat_id && (rule.topic_id.is_none() || rule.topic_id == message.topic_id)
+    })
 }
 
 fn show_notification(app: &tauri::AppHandle, message: &str) {

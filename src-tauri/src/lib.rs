@@ -7,9 +7,10 @@ mod timer;
 mod tray;
 
 use config::Config;
-use std::{env, process::Command, sync::Arc};
+use serde::Serialize;
+use std::{env, path::Path, process::Command, sync::Arc};
 use tauri::State;
-use telegram::{TelegramBridge, TelegramChatSummary, TelegramConnectionStatus, TelegramMessage, TelegramTopicSummary};
+use telegram::{TelegramBridge, TelegramChatSummary, TelegramConnectionStatus, TelegramDownloadedFile, TelegramMessage, TelegramTopicSummary};
 use timer::{Phase, TimerHandle, TimerSnapshot};
 use tokio::sync::RwLock;
 
@@ -19,6 +20,12 @@ struct AppState {
     timer: TimerHandle,
     enforcement_enabled: Arc<RwLock<bool>>,
     telegram: TelegramBridge,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TelegramClearDownloadsResult {
+    removed_files: u64,
+    removed_bytes: u64,
 }
 
 #[tauri::command]
@@ -224,7 +231,7 @@ async fn get_telegram_messages(chat_id: String, topic_id: Option<i64>, from_mess
         .telegram
         .work_allowed_chats
         .iter()
-        .any(|chat| chat.id == chat_id && chat.topic_id == topic_id);
+        .any(|chat| chat.id == chat_id && (chat.topic_id.is_none() || chat.topic_id == topic_id));
     if !allowed {
         return Err("This chat is not allowed in wlbal".into());
     }
@@ -236,6 +243,129 @@ async fn get_telegram_messages(chat_id: String, topic_id: Option<i64>, from_mess
 }
 
 #[tauri::command]
+async fn search_telegram_messages(chat_id: String, topic_id: Option<i64>, query: String, from_message_id: Option<i64>, state: State<'_, AppState>) -> Result<Vec<TelegramMessage>, String> {
+    let allowed = state
+        .config
+        .read()
+        .await
+        .telegram
+        .work_allowed_chats
+        .iter()
+        .any(|chat| chat.id == chat_id && (chat.topic_id.is_none() || chat.topic_id == topic_id));
+    if !allowed {
+        return Err("This chat is not allowed in wlbal".into());
+    }
+
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let bridge = state.telegram.clone();
+    tokio::task::spawn_blocking(move || bridge.search_messages(chat_id, topic_id, query, from_message_id.unwrap_or(0), 30))
+        .await
+        .map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
+async fn download_telegram_media(file_id: i64, state: State<'_, AppState>) -> Result<TelegramDownloadedFile, String> {
+    let bridge = state.telegram.clone();
+    tokio::task::spawn_blocking(move || bridge.download_file(file_id))
+        .await
+        .map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
+async fn clear_telegram_downloads(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<TelegramClearDownloadsResult, String> {
+    let config = state.config.read().await.clone();
+    if state.telegram.status(&config).bridge_running {
+        state.telegram.stop(&config, &app);
+    }
+
+    tokio::task::spawn_blocking(move || {
+        let files_dir = config::config_dir().join("telegram").join("files");
+        let (removed_files, removed_bytes) = dir_stats(&files_dir);
+        if files_dir.exists() {
+            std::fs::remove_dir_all(&files_dir)
+                .map_err(|err| format!("Failed to clear Telegram downloads: {err}"))?;
+        }
+        std::fs::create_dir_all(&files_dir)
+            .map_err(|err| format!("Failed to recreate Telegram downloads directory: {err}"))?;
+        Ok(TelegramClearDownloadsResult {
+            removed_files,
+            removed_bytes,
+        })
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
+fn open_telegram_media(path: String) -> Result<(), String> {
+    let requested = Path::new(&path);
+    let canonical = requested
+        .canonicalize()
+        .map_err(|err| format!("Media file is not available locally: {err}"))?;
+    let media_root = config::config_dir()
+        .join("telegram")
+        .join("files")
+        .canonicalize()
+        .map_err(|err| format!("Telegram files directory is not available: {err}"))?;
+    if !canonical.starts_with(media_root) {
+        return Err("Refusing to open a file outside the Telegram files directory".into());
+    }
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(&canonical);
+        command
+    };
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", &canonical.to_string_lossy()]);
+        command
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(&canonical);
+        command
+    };
+
+    command
+        .spawn()
+        .map_err(|err| format!("Failed to open media file: {err}"))?;
+    Ok(())
+}
+
+fn dir_stats(path: &Path) -> (u64, u64) {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return (0, 0);
+    };
+    let mut files = 0;
+    let mut bytes = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.is_dir() {
+            let (nested_files, nested_bytes) = dir_stats(&path);
+            files += nested_files;
+            bytes += nested_bytes;
+        } else {
+            files += 1;
+            bytes += meta.len();
+        }
+    }
+    (files, bytes)
+}
+
+#[tauri::command]
 async fn send_telegram_message(chat_id: String, topic_id: Option<i64>, reply_to_message_id: Option<String>, text: String, state: State<'_, AppState>) -> Result<TelegramMessage, String> {
     let allowed = state
         .config
@@ -244,7 +374,7 @@ async fn send_telegram_message(chat_id: String, topic_id: Option<i64>, reply_to_
         .telegram
         .work_allowed_chats
         .iter()
-        .any(|chat| chat.id == chat_id && chat.topic_id == topic_id);
+        .any(|chat| chat.id == chat_id && (chat.topic_id.is_none() || chat.topic_id == topic_id));
     if !allowed {
         return Err("This chat is not allowed in wlbal".into());
     }
@@ -264,16 +394,13 @@ async fn forward_telegram_message(chat_id: String, topic_id: Option<i64>, from_c
         .telegram
         .work_allowed_chats
         .iter()
-        .any(|chat| chat.id == chat_id && chat.topic_id == topic_id);
+        .any(|chat| chat.id == chat_id && (chat.topic_id.is_none() || chat.topic_id == topic_id));
     if !allowed {
         return Err("This chat is not allowed in wlbal".into());
     }
-    if topic_id.is_some() {
-        return Err("Forwarding into Telegram topics is not enabled yet".into());
-    }
 
     let bridge = state.telegram.clone();
-    tokio::task::spawn_blocking(move || bridge.forward_message(chat_id, from_chat_id, message_id))
+    tokio::task::spawn_blocking(move || bridge.forward_message(chat_id, topic_id, from_chat_id, message_id))
         .await
         .map_err(|err| err.to_string())?
 }
@@ -391,6 +518,10 @@ pub fn run() {
             get_telegram_chats,
             get_telegram_topics,
             get_telegram_messages,
+            search_telegram_messages,
+            download_telegram_media,
+            clear_telegram_downloads,
+            open_telegram_media,
             send_telegram_message,
             forward_telegram_message,
             react_to_telegram_message,

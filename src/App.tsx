@@ -313,13 +313,13 @@ function Rules({
 
   return (
     <div className="rules-panels">
-      <RulePanel title="Apps" expanded={Boolean(expanded.apps)} onToggle={() => setExpanded((value) => ({ ...value, apps: !value.apps }))}>
+      <RulePanel title="Apps" width="900px" expanded={Boolean(expanded.apps)} onToggle={() => setExpanded((value) => ({ ...value, apps: !value.apps }))}>
         <AppManager config={config} setConfig={setConfig} installedApps={installedApps} activePhase={state.phase} />
       </RulePanel>
-      <RulePanel title="Websites" expanded={Boolean(expanded.websites)} onToggle={() => setExpanded((value) => ({ ...value, websites: !value.websites }))}>
+      <RulePanel title="Websites" width="720px" expanded={Boolean(expanded.websites)} onToggle={() => setExpanded((value) => ({ ...value, websites: !value.websites }))}>
         <WebManager config={config} setConfig={setConfig} activePhase={state.phase} />
       </RulePanel>
-      <RulePanel title="Telegram" expanded={Boolean(expanded.telegram)} onToggle={() => setExpanded((value) => ({ ...value, telegram: !value.telegram }))}>
+      <RulePanel title="Telegram" width="520px" expanded={Boolean(expanded.telegram)} onToggle={() => setExpanded((value) => ({ ...value, telegram: !value.telegram }))}>
         <TelegramManager config={config} setConfig={setConfig} activePhase={state.phase} />
       </RulePanel>
     </div>
@@ -328,17 +328,22 @@ function Rules({
 
 function RulePanel({
   title,
+  width,
   expanded,
   onToggle,
   children,
 }: {
   title: string;
+  width: string;
   expanded: boolean;
   onToggle: () => void;
   children: ReactNode;
 }) {
   return (
-    <section className={`rule-panel-shell ${expanded ? "rule-panel-expanded" : "rule-panel-collapsed"}`}>
+    <section
+      className={`rule-panel-shell ${expanded ? "rule-panel-expanded" : "rule-panel-collapsed"}`}
+      style={{ "--rule-panel-width": width } as React.CSSProperties}
+    >
       <button className="rule-panel-tab" onClick={onToggle} title={expanded ? `Collapse ${title}` : `Expand ${title}`}>
         <span>{title}</span>
       </button>

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Lock, MessageCircle, Minus, Plus, RefreshCw, Search } from "lucide-react";
+import { Lock, MessageCircle, Minus, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import type { Config } from "../App";
@@ -33,6 +33,11 @@ type TelegramTopicSummary = {
   selected: boolean;
 };
 
+type TelegramClearDownloadsResult = {
+  removed_files: number;
+  removed_bytes: number;
+};
+
 const defaultStatus: TelegramStatus = {
   enabled: false,
   connected: false,
@@ -57,11 +62,16 @@ export function TelegramManager({
   const [chatTitle, setChatTitle] = useState("");
   const [chatQuery, setChatQuery] = useState("");
   const [topicChatId, setTopicChatId] = useState<string | null>(null);
+  const [topicChatTitle, setTopicChatTitle] = useState<string | null>(null);
+  const [topicLoading, setTopicLoading] = useState(false);
+  const [topicError, setTopicError] = useState<string | null>(null);
   const [topics, setTopics] = useState<TelegramTopicSummary[]>([]);
   const [phoneNumber, setPhoneNumber] = useState("");
   const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [downloadsMessage, setDownloadsMessage] = useState<string | null>(null);
+  const [clearingDownloads, setClearingDownloads] = useState(false);
 
   const selectedIds = useMemo(
     () => new Set(config.telegram.work_allowed_chats.map(ruleKey)),
@@ -123,6 +133,23 @@ export function TelegramManager({
     }
   };
 
+  const clearDownloads = async () => {
+    const confirmed = window.confirm(
+      "Clear Telegram media downloads from this app? The bridge will stop if it is running. Your Telegram login database and settings will stay intact.",
+    );
+    if (!confirmed) return;
+    setClearingDownloads(true);
+    try {
+      const result = await invoke<TelegramClearDownloadsResult>("clear_telegram_downloads");
+      setDownloadsMessage(`Cleared ${result.removed_files} files (${formatBytes(result.removed_bytes)}).`);
+      await refreshTelegram();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setClearingDownloads(false);
+    }
+  };
+
   const submitPhone = async () => {
     try {
       await invoke("telegram_set_phone_number", { phoneNumber });
@@ -171,19 +198,25 @@ export function TelegramManager({
   };
 
   const loadTopics = async (chat: TelegramChatSummary) => {
+    setTopicChatId(chat.id);
+    setTopicChatTitle(chat.title);
+    setTopicLoading(true);
+    setTopicError(null);
     try {
       const next = await invoke<TelegramTopicSummary[]>("get_telegram_topics", { chatId: chat.id });
-      setTopicChatId(chat.id);
       setTopics(next);
       setError(null);
     } catch (err) {
-      setError(String(err));
+      setTopics([]);
+      setTopicError(String(err));
+    } finally {
+      setTopicLoading(false);
     }
   };
 
-  const removeChat = (id: string) => {
+  const removeChat = (key: string) => {
     updateTelegram({
-      work_allowed_chats: config.telegram.work_allowed_chats.filter((chat) => chat.id !== id),
+      work_allowed_chats: config.telegram.work_allowed_chats.filter((chat) => ruleKey(chat) !== key),
     });
   };
 
@@ -228,6 +261,20 @@ export function TelegramManager({
             </div>
           </div>
           <p className="text-sm leading-6 text-[#a8a8a8]">{error ?? status.message}</p>
+          <div className="mt-4 border-t border-line pt-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="font-mono text-xs uppercase text-[#d0d0d0]">Downloads</div>
+                <div className="mt-1 text-sm leading-5 text-[#8b8b8b]">
+                  {downloadsMessage ?? "Remove locally cached Telegram media."}
+                </div>
+              </div>
+              <button className="secondary-action" onClick={clearDownloads} disabled={clearingDownloads}>
+                <Trash2 size={15} />
+                {clearingDownloads ? "Clearing" : "Clear"}
+              </button>
+            </div>
+          </div>
         </div>
 
         <div className="mb-5 border border-line bg-[#121212] p-4">
@@ -316,11 +363,9 @@ export function TelegramManager({
                     <div className="truncate text-sm text-[#ededed]">{chat.title}</div>
                     <div className="truncate font-mono text-[11px] text-muted">{chat.id}</div>
                   </div>
-                  {chat.is_forum && (
-                    <button className="icon-button" onClick={() => loadTopics(chat)} title="Load topics">
-                      <MessageCircle size={15} />
-                    </button>
-                  )}
+                  <button className="icon-button" onClick={() => loadTopics(chat)} title="Load topics">
+                    <MessageCircle size={15} />
+                  </button>
                   <button
                     className="icon-button"
                     onClick={() => addChat({ id: chat.id, title: chat.title })}
@@ -332,37 +377,48 @@ export function TelegramManager({
                 </div>
               ))}
             </div>
-            {topicChatId && topics.length > 0 && (
+            {topicChatId && (
               <div className="mt-4 border-t border-line pt-4">
-                <div className="mb-3 font-mono text-xs uppercase text-muted">Topics</div>
-                <div className="space-y-2">
-                  {topics.map((topic) => {
-                    const parent = chats.find((chat) => chat.id === topic.chat_id);
-                    return (
-                      <div key={`${topic.chat_id}:${topic.id}`} className="telegram-chat-row">
-                        <div className="min-w-0 flex-1">
-                          <div className="truncate text-sm text-[#ededed]">{topic.title}</div>
-                          <div className="truncate font-mono text-[11px] text-muted">{parent?.title ?? topic.chat_id}</div>
-                        </div>
-                        <button
-                          className="icon-button"
-                          onClick={() =>
-                            addChat({
-                              id: topic.chat_id,
-                              title: parent?.title ?? topic.chat_id,
-                              topic_id: topic.id,
-                              topic_title: topic.title,
-                            })
-                          }
-                          disabled={selectedIds.has(ruleKey({ id: topic.chat_id, topic_id: topic.id }))}
-                          title="Allow topic"
-                        >
-                          <Plus size={15} />
-                        </button>
-                      </div>
-                    );
-                  })}
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div className="font-mono text-xs uppercase text-muted">Topics</div>
+                  <div className="truncate text-right font-mono text-[11px] text-muted">{topicChatTitle ?? topicChatId}</div>
                 </div>
+                {topicLoading ? (
+                  <div className="font-mono text-xs uppercase text-muted">Loading topics...</div>
+                ) : topicError ? (
+                  <div className="text-sm leading-6 text-[#f19a9a]">{topicError}</div>
+                ) : topics.length === 0 ? (
+                  <div className="text-sm leading-6 text-[#a8a8a8]">No topics returned for this chat.</div>
+                ) : (
+                  <div className="space-y-2">
+                    {topics.map((topic) => {
+                      const parent = chats.find((chat) => chat.id === topic.chat_id);
+                      return (
+                        <div key={`${topic.chat_id}:${topic.id}`} className="telegram-chat-row">
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-sm text-[#ededed]">{topic.title}</div>
+                            <div className="truncate font-mono text-[11px] text-muted">{parent?.title ?? topic.chat_id}</div>
+                          </div>
+                          <button
+                            className="icon-button"
+                            onClick={() =>
+                              addChat({
+                                id: topic.chat_id,
+                                title: parent?.title ?? topic.chat_id,
+                                topic_id: topic.id,
+                                topic_title: topic.title,
+                              })
+                            }
+                            disabled={selectedIds.has(ruleKey({ id: topic.chat_id, topic_id: topic.id }))}
+                            title="Allow topic"
+                          >
+                            <Plus size={15} />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -435,7 +491,7 @@ function ChatList({
   title: string;
   chats: TelegramChatRule[];
   empty: string;
-  onRemove: (id: string) => void;
+  onRemove: (key: string) => void;
 }) {
   return (
     <div className="border border-line bg-[#121212] p-4">
@@ -444,17 +500,20 @@ function ChatList({
         <div className="font-mono text-xs uppercase text-muted">{empty}</div>
       ) : (
         <div className="space-y-2">
-          {chats.map((chat) => (
-            <div key={chat.id} className="telegram-chat-row">
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm text-[#ededed]">{ruleTitle(chat)}</div>
-                <div className="truncate font-mono text-[11px] text-muted">{chat.id}</div>
+          {chats.map((chat) => {
+            const key = ruleKey(chat);
+            return (
+              <div key={key} className="telegram-chat-row">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm text-[#ededed]">{ruleTitle(chat)}</div>
+                  <div className="truncate font-mono text-[11px] text-muted">{chat.id}</div>
+                </div>
+                <button className="icon-button" onClick={() => onRemove(key)} title="Remove chat">
+                  <Minus size={15} />
+                </button>
               </div>
-              <button className="icon-button" onClick={() => onRemove(chat.id)} title="Remove chat">
-                <Minus size={15} />
-              </button>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
@@ -474,4 +533,16 @@ function ruleKey(chat: Pick<TelegramChatRule, "id" | "topic_id">) {
 
 function ruleTitle(chat: Pick<TelegramChatRule, "title" | "topic_title">) {
   return chat.topic_title ? `${chat.title} / ${chat.topic_title}` : chat.title;
+}
+
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
 }
