@@ -9,7 +9,7 @@ mod tray;
 use config::Config;
 use std::{env, process::Command, sync::Arc};
 use tauri::State;
-use telegram::{TelegramBridge, TelegramChatSummary, TelegramConnectionStatus, TelegramMessage};
+use telegram::{TelegramBridge, TelegramChatSummary, TelegramConnectionStatus, TelegramMessage, TelegramTopicSummary};
 use timer::{Phase, TimerHandle, TimerSnapshot};
 use tokio::sync::RwLock;
 
@@ -32,9 +32,10 @@ async fn get_config(state: State<'_, AppState>) -> Result<Config, String> {
 }
 
 #[tauri::command]
-async fn save_config(config: Config, state: State<'_, AppState>) -> Result<(), String> {
+async fn save_config(config: Config, app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let previous = state.config.read().await.clone();
     let schedule_changed = previous.schedule != config.schedule;
+    let should_stop_telegram = !(config.telegram.enabled && config.telegram.block_official_clients_during_work);
     config::save_config_to_disk(&config).map_err(|err| err.to_string())?;
     *state.config.write().await = config;
     let current = state.config.read().await.clone();
@@ -48,6 +49,9 @@ async fn save_config(config: Config, state: State<'_, AppState>) -> Result<(), S
     let armed = *state.enforcement_enabled.read().await;
     if armed {
         enforcer::apply_website_rules_now(&current, &state.timer, true, true).await?;
+    }
+    if should_stop_telegram {
+        state.telegram.stop(&current, &app);
     }
     Ok(())
 }
@@ -134,6 +138,13 @@ async fn start_telegram_bridge(
 }
 
 #[tauri::command]
+async fn stop_telegram_bridge(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<TelegramConnectionStatus, String> {
+    let config = state.config.read().await.clone();
+    state.telegram.stop(&config, &app);
+    Ok(state.telegram.status(&config))
+}
+
+#[tauri::command]
 async fn telegram_set_phone_number(phone_number: String, state: State<'_, AppState>) -> Result<(), String> {
     let bridge = state.telegram.clone();
     tokio::task::spawn_blocking(move || bridge.set_phone_number(phone_number))
@@ -177,6 +188,8 @@ async fn get_telegram_chats(state: State<'_, AppState>) -> Result<Vec<TelegramCh
                 id: chat.id,
                 title: chat.title,
                 selected: true,
+                unread_count: 0,
+                is_forum: false,
             })
             .collect());
     }
@@ -188,27 +201,22 @@ async fn get_telegram_chats(state: State<'_, AppState>) -> Result<Vec<TelegramCh
 }
 
 #[tauri::command]
-async fn get_telegram_messages(chat_id: String, from_message_id: Option<i64>, state: State<'_, AppState>) -> Result<Vec<TelegramMessage>, String> {
-    let allowed = state
-        .config
-        .read()
-        .await
+async fn get_telegram_topics(chat_id: String, state: State<'_, AppState>) -> Result<Vec<TelegramTopicSummary>, String> {
+    let config = state.config.read().await.clone();
+    let selected_rules = config
         .telegram
         .work_allowed_chats
         .iter()
-        .any(|chat| chat.id == chat_id);
-    if !allowed {
-        return Err("This chat is not allowed in wlbal".into());
-    }
-
+        .map(|chat| (chat.id.clone(), chat.topic_id))
+        .collect::<Vec<_>>();
     let bridge = state.telegram.clone();
-    tokio::task::spawn_blocking(move || bridge.get_messages(chat_id, from_message_id.unwrap_or(0), 50))
+    tokio::task::spawn_blocking(move || bridge.get_topics(chat_id, &selected_rules))
         .await
         .map_err(|err| err.to_string())?
 }
 
 #[tauri::command]
-async fn send_telegram_message(chat_id: String, text: String, state: State<'_, AppState>) -> Result<TelegramMessage, String> {
+async fn get_telegram_messages(chat_id: String, topic_id: Option<i64>, from_message_id: Option<i64>, state: State<'_, AppState>) -> Result<Vec<TelegramMessage>, String> {
     let allowed = state
         .config
         .read()
@@ -216,13 +224,72 @@ async fn send_telegram_message(chat_id: String, text: String, state: State<'_, A
         .telegram
         .work_allowed_chats
         .iter()
-        .any(|chat| chat.id == chat_id);
+        .any(|chat| chat.id == chat_id && chat.topic_id == topic_id);
     if !allowed {
         return Err("This chat is not allowed in wlbal".into());
     }
 
     let bridge = state.telegram.clone();
-    tokio::task::spawn_blocking(move || bridge.send_message(chat_id, text))
+    tokio::task::spawn_blocking(move || bridge.get_messages(chat_id, topic_id, from_message_id.unwrap_or(0), 50))
+        .await
+        .map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
+async fn send_telegram_message(chat_id: String, topic_id: Option<i64>, reply_to_message_id: Option<String>, text: String, state: State<'_, AppState>) -> Result<TelegramMessage, String> {
+    let allowed = state
+        .config
+        .read()
+        .await
+        .telegram
+        .work_allowed_chats
+        .iter()
+        .any(|chat| chat.id == chat_id && chat.topic_id == topic_id);
+    if !allowed {
+        return Err("This chat is not allowed in wlbal".into());
+    }
+
+    let bridge = state.telegram.clone();
+    tokio::task::spawn_blocking(move || bridge.send_message(chat_id, topic_id, reply_to_message_id, text))
+        .await
+        .map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
+async fn forward_telegram_message(chat_id: String, topic_id: Option<i64>, from_chat_id: String, message_id: String, state: State<'_, AppState>) -> Result<Vec<TelegramMessage>, String> {
+    let allowed = state
+        .config
+        .read()
+        .await
+        .telegram
+        .work_allowed_chats
+        .iter()
+        .any(|chat| chat.id == chat_id && chat.topic_id == topic_id);
+    if !allowed {
+        return Err("This chat is not allowed in wlbal".into());
+    }
+    if topic_id.is_some() {
+        return Err("Forwarding into Telegram topics is not enabled yet".into());
+    }
+
+    let bridge = state.telegram.clone();
+    tokio::task::spawn_blocking(move || bridge.forward_message(chat_id, from_chat_id, message_id))
+        .await
+        .map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
+async fn react_to_telegram_message(chat_id: String, message_id: String, emoji: String, state: State<'_, AppState>) -> Result<(), String> {
+    let bridge = state.telegram.clone();
+    tokio::task::spawn_blocking(move || bridge.add_reaction(chat_id, message_id, emoji))
+        .await
+        .map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
+async fn mark_telegram_messages_read(chat_id: String, message_ids: Vec<String>, state: State<'_, AppState>) -> Result<(), String> {
+    let bridge = state.telegram.clone();
+    tokio::task::spawn_blocking(move || bridge.view_messages(chat_id, message_ids))
         .await
         .map_err(|err| err.to_string())?
 }
@@ -317,12 +384,17 @@ pub fn run() {
             install_cli_binary,
             get_telegram_status,
             start_telegram_bridge,
+            stop_telegram_bridge,
             telegram_set_phone_number,
             telegram_check_code,
             telegram_check_password,
             get_telegram_chats,
+            get_telegram_topics,
             get_telegram_messages,
             send_telegram_message,
+            forward_telegram_message,
+            react_to_telegram_message,
+            mark_telegram_messages_read,
             run_get_to_work_script
         ])
         .run(tauri::generate_context!())

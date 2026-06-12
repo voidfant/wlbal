@@ -49,6 +49,8 @@ export type Config = {
     work_allowed_chats: Array<{
       id: string;
       title: string;
+      topic_id?: number | null;
+      topic_title?: string | null;
     }>;
   };
   override: {
@@ -66,7 +68,7 @@ export type Config = {
 
 type Tab = "timer" | "rules" | "telegram" | "settings";
 
-const tabs: Array<{ id: Tab; label: string; icon: LucideIcon }> = [
+const allTabs: Array<{ id: Tab; label: string; icon: LucideIcon }> = [
   { id: "timer", label: "Timer", icon: Clock3 },
   { id: "rules", label: "Rules", icon: ListChecks },
   { id: "telegram", label: "Telegram", icon: MessageCircle },
@@ -179,6 +181,17 @@ export default function App() {
 
   const accent = state.phase === "Work" ? "work" : "leisure";
   const showOnboarding = !config.onboarding.completed;
+  const telegramVisible = config.telegram.enabled && config.telegram.block_official_clients_during_work;
+  const tabs = useMemo(
+    () => allTabs.filter((item) => item.id !== "telegram" || telegramVisible),
+    [telegramVisible],
+  );
+
+  useEffect(() => {
+    if (!telegramVisible && tab === "telegram") {
+      setTab("rules");
+    }
+  }, [tab, telegramVisible]);
 
   const startWindowDrag = (event: React.MouseEvent<HTMLElement>) => {
     if (event.button !== 0) return;
@@ -266,7 +279,7 @@ export default function App() {
               installedApps={installedApps}
               state={state}
             />
-          ) : tab === "telegram" ? (
+          ) : tab === "telegram" && telegramVisible ? (
             <TelegramSurface config={config} setConfig={setConfig} />
           ) : (
             <Settings config={config} setConfig={setConfig} />
@@ -288,12 +301,41 @@ function Rules({
   installedApps: AppInfo[];
   state: TimerState;
 }) {
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+
   return (
-    <div className="grid h-full grid-cols-[1.1fr_1fr_0.95fr] gap-0">
-      <AppManager config={config} setConfig={setConfig} installedApps={installedApps} activePhase={state.phase} />
-      <WebManager config={config} setConfig={setConfig} activePhase={state.phase} />
-      <TelegramManager config={config} setConfig={setConfig} activePhase={state.phase} />
+    <div className="rules-panels">
+      <RulePanel title="Apps" expanded={Boolean(expanded.apps)} onToggle={() => setExpanded((value) => ({ ...value, apps: !value.apps }))}>
+        <AppManager config={config} setConfig={setConfig} installedApps={installedApps} activePhase={state.phase} />
+      </RulePanel>
+      <RulePanel title="Websites" expanded={Boolean(expanded.websites)} onToggle={() => setExpanded((value) => ({ ...value, websites: !value.websites }))}>
+        <WebManager config={config} setConfig={setConfig} activePhase={state.phase} />
+      </RulePanel>
+      <RulePanel title="Telegram" expanded={Boolean(expanded.telegram)} onToggle={() => setExpanded((value) => ({ ...value, telegram: !value.telegram }))}>
+        <TelegramManager config={config} setConfig={setConfig} activePhase={state.phase} />
+      </RulePanel>
     </div>
+  );
+}
+
+function RulePanel({
+  title,
+  expanded,
+  onToggle,
+  children,
+}: {
+  title: string;
+  expanded: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <section className={`rule-panel-shell ${expanded ? "rule-panel-expanded" : "rule-panel-collapsed"}`}>
+      <button className="rule-panel-tab" onClick={onToggle} title={expanded ? `Collapse ${title}` : `Expand ${title}`}>
+        <span>{title}</span>
+      </button>
+      {expanded && <div className="rule-panel-body">{children}</div>}
+    </section>
   );
 }
 

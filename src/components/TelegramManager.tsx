@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Lock, MessageCircle, Minus, Plus, RefreshCw } from "lucide-react";
+import { Lock, MessageCircle, Minus, Plus, RefreshCw, Search } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import type { Config } from "../App";
@@ -20,6 +20,16 @@ type TelegramStatus = {
 type TelegramChatSummary = {
   id: string;
   title: string;
+  selected: boolean;
+  unread_count: number;
+  is_forum: boolean;
+};
+
+type TelegramTopicSummary = {
+  chat_id: string;
+  id: number;
+  title: string;
+  unread_count: number;
   selected: boolean;
 };
 
@@ -45,15 +55,24 @@ export function TelegramManager({
   const [chats, setChats] = useState<TelegramChatSummary[]>([]);
   const [chatId, setChatId] = useState("");
   const [chatTitle, setChatTitle] = useState("");
+  const [chatQuery, setChatQuery] = useState("");
+  const [topicChatId, setTopicChatId] = useState<string | null>(null);
+  const [topics, setTopics] = useState<TelegramTopicSummary[]>([]);
   const [phoneNumber, setPhoneNumber] = useState("");
   const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const selectedIds = useMemo(
-    () => new Set(config.telegram.work_allowed_chats.map((chat) => chat.id)),
+    () => new Set(config.telegram.work_allowed_chats.map(ruleKey)),
     [config.telegram.work_allowed_chats],
   );
+  const telegramVisible = config.telegram.enabled && config.telegram.block_official_clients_during_work;
+  const filteredChats = useMemo(() => {
+    const query = chatQuery.trim().toLowerCase();
+    if (!query) return chats;
+    return chats.filter((chat) => `${chat.title} ${chat.id}`.toLowerCase().includes(query));
+  }, [chatQuery, chats]);
 
   const refreshTelegram = async () => {
     try {
@@ -77,6 +96,14 @@ export function TelegramManager({
       stateChanged.then((off) => off());
     };
   }, []);
+
+  useEffect(() => {
+    if (!telegramVisible && status.bridge_running) {
+      invoke<TelegramStatus>("stop_telegram_bridge")
+        .then(setStatus)
+        .catch((err) => setError(String(err)));
+    }
+  }, [telegramVisible, status.bridge_running]);
 
   const updateTelegram = (patch: Partial<Config["telegram"]>) => {
     setConfig({ ...config, telegram: { ...config.telegram, ...patch } });
@@ -130,15 +157,28 @@ export function TelegramManager({
     const normalized = {
       id: chat.id.trim(),
       title: chat.title.trim() || chat.id.trim(),
+      topic_id: chat.topic_id ?? null,
+      topic_title: chat.topic_title ?? null,
     };
-    if (!normalized.id || selectedIds.has(normalized.id)) return;
+    if (!normalized.id || selectedIds.has(ruleKey(normalized))) return;
     updateTelegram({
       work_allowed_chats: [...config.telegram.work_allowed_chats, normalized].sort((a, b) =>
-        a.title.localeCompare(b.title),
+        ruleTitle(a).localeCompare(ruleTitle(b)),
       ),
     });
     setChatId("");
     setChatTitle("");
+  };
+
+  const loadTopics = async (chat: TelegramChatSummary) => {
+    try {
+      const next = await invoke<TelegramTopicSummary[]>("get_telegram_topics", { chatId: chat.id });
+      setTopicChatId(chat.id);
+      setTopics(next);
+      setError(null);
+    } catch (err) {
+      setError(String(err));
+    }
   };
 
   const removeChat = (id: string) => {
@@ -265,24 +305,66 @@ export function TelegramManager({
         {chats.length > 0 && (
           <div className="mt-5 border border-line bg-[#121212] p-4">
             <div className="mb-3 font-mono text-sm uppercase text-[#d0d0d0]">Known Chats</div>
+            <label className="search-field mb-3">
+              <Search size={16} />
+              <input value={chatQuery} onChange={(event) => setChatQuery(event.target.value)} placeholder="Search chats" />
+            </label>
             <div className="space-y-2">
-              {chats.map((chat) => (
+              {filteredChats.map((chat) => (
                 <div key={chat.id} className="telegram-chat-row">
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm text-[#ededed]">{chat.title}</div>
                     <div className="truncate font-mono text-[11px] text-muted">{chat.id}</div>
                   </div>
+                  {chat.is_forum && (
+                    <button className="icon-button" onClick={() => loadTopics(chat)} title="Load topics">
+                      <MessageCircle size={15} />
+                    </button>
+                  )}
                   <button
                     className="icon-button"
                     onClick={() => addChat({ id: chat.id, title: chat.title })}
-                    disabled={selectedIds.has(chat.id)}
-                    title="Allow chat"
+                    disabled={selectedIds.has(ruleKey({ id: chat.id }))}
+                    title="Allow whole chat"
                   >
                     <Plus size={15} />
                   </button>
                 </div>
               ))}
             </div>
+            {topicChatId && topics.length > 0 && (
+              <div className="mt-4 border-t border-line pt-4">
+                <div className="mb-3 font-mono text-xs uppercase text-muted">Topics</div>
+                <div className="space-y-2">
+                  {topics.map((topic) => {
+                    const parent = chats.find((chat) => chat.id === topic.chat_id);
+                    return (
+                      <div key={`${topic.chat_id}:${topic.id}`} className="telegram-chat-row">
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-sm text-[#ededed]">{topic.title}</div>
+                          <div className="truncate font-mono text-[11px] text-muted">{parent?.title ?? topic.chat_id}</div>
+                        </div>
+                        <button
+                          className="icon-button"
+                          onClick={() =>
+                            addChat({
+                              id: topic.chat_id,
+                              title: parent?.title ?? topic.chat_id,
+                              topic_id: topic.id,
+                              topic_title: topic.title,
+                            })
+                          }
+                          disabled={selectedIds.has(ruleKey({ id: topic.chat_id, topic_id: topic.id }))}
+                          title="Allow topic"
+                        >
+                          <Plus size={15} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -365,7 +447,7 @@ function ChatList({
           {chats.map((chat) => (
             <div key={chat.id} className="telegram-chat-row">
               <div className="min-w-0 flex-1">
-                <div className="truncate text-sm text-[#ededed]">{chat.title}</div>
+                <div className="truncate text-sm text-[#ededed]">{ruleTitle(chat)}</div>
                 <div className="truncate font-mono text-[11px] text-muted">{chat.id}</div>
               </div>
               <button className="icon-button" onClick={() => onRemove(chat.id)} title="Remove chat">
@@ -384,4 +466,12 @@ function parseApiId(value: string) {
   if (!trimmed) return null;
   if (!/^\d+$/.test(trimmed)) return null;
   return Number(trimmed);
+}
+
+function ruleKey(chat: Pick<TelegramChatRule, "id" | "topic_id">) {
+  return `${chat.id}:${chat.topic_id ?? "chat"}`;
+}
+
+function ruleTitle(chat: Pick<TelegramChatRule, "title" | "topic_title">) {
+  return chat.topic_title ? `${chat.title} / ${chat.topic_title}` : chat.title;
 }

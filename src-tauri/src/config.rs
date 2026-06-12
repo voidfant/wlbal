@@ -47,6 +47,10 @@ pub struct SiteRules {
 pub struct TelegramChatRule {
     pub id: String,
     pub title: String,
+    #[serde(default)]
+    pub topic_id: Option<i64>,
+    #[serde(default)]
+    pub topic_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

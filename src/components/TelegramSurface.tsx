@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Lock, MessageCircle, RefreshCw, Send } from "lucide-react";
+import { CornerUpLeft, Forward, Lock, MessageCircle, RefreshCw, Send, Smile } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { Config } from "../App";
 
@@ -16,10 +16,20 @@ type TelegramStatus = {
 type TelegramMessage = {
   id: string;
   chat_id: string;
+  topic_id?: number | null;
   sender: string;
   date: number;
   outgoing: boolean;
   text: string;
+  media?: {
+    kind: string;
+    file_id?: number | null;
+    file_name?: string | null;
+    mime_type?: string | null;
+  } | null;
+  reply_to_message_id?: string | null;
+  forward_label?: string | null;
+  reactions: string[];
 };
 
 const defaultStatus: TelegramStatus = {
@@ -40,24 +50,26 @@ export function TelegramSurface({
 }) {
   const allowedChats = config.telegram.work_allowed_chats;
   const [status, setStatus] = useState<TelegramStatus>(defaultStatus);
-  const [activeChatId, setActiveChatId] = useState(() => allowedChats[0]?.id ?? "");
+  const [activeChatKey, setActiveChatKey] = useState(() => allowedChats[0] ? ruleKey(allowedChats[0]) : "");
   const [messages, setMessages] = useState<TelegramMessage[]>([]);
+  const [unreadByChat, setUnreadByChat] = useState<Record<string, number>>({});
   const [draft, setDraft] = useState("");
+  const [replyTo, setReplyTo] = useState<TelegramMessage | null>(null);
   const [phoneNumber, setPhoneNumber] = useState("");
   const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const activeChat = useMemo(
-    () => allowedChats.find((chat) => chat.id === activeChatId) ?? allowedChats[0],
-    [activeChatId, allowedChats],
+    () => allowedChats.find((chat) => ruleKey(chat) === activeChatKey) ?? allowedChats[0],
+    [activeChatKey, allowedChats],
   );
 
   useEffect(() => {
-    if (!activeChatId && allowedChats[0]) {
-      setActiveChatId(allowedChats[0].id);
+    if (!activeChatKey && allowedChats[0]) {
+      setActiveChatKey(ruleKey(allowedChats[0]));
     }
-  }, [activeChatId, allowedChats]);
+  }, [activeChatKey, allowedChats]);
 
   useEffect(() => {
     refreshStatus();
@@ -65,15 +77,19 @@ export function TelegramSurface({
       setStatus(event.payload.status);
     });
     const messageReceived = listen<TelegramMessage>("telegram-message", (event) => {
-      if (event.payload.chat_id === activeChatId) {
+      const key = messageKey(event.payload);
+      if (activeChat && event.payload.chat_id === activeChat.id && (event.payload.topic_id ?? null) === (activeChat.topic_id ?? null)) {
         setMessages((current) => upsertMessages([...current, event.payload]));
+        markRead(event.payload.chat_id, [event.payload.id]);
+      } else {
+        setUnreadByChat((current) => ({ ...current, [key]: (current[key] ?? 0) + 1 }));
       }
     });
     return () => {
       stateChanged.then((off) => off());
       messageReceived.then((off) => off());
     };
-  }, [activeChatId]);
+  }, [activeChat?.id, activeChat?.topic_id]);
 
   useEffect(() => {
     if (activeChat?.id && status.connected) {
@@ -116,9 +132,14 @@ export function TelegramSurface({
     try {
       const next = await invoke<TelegramMessage[]>("get_telegram_messages", {
         chatId,
+        topicId: activeChat?.topic_id ?? null,
         fromMessageId: 0,
       });
       setMessages(upsertMessages(next));
+      markRead(chatId, next.map((message) => message.id));
+      if (activeChat) {
+        setUnreadByChat((current) => ({ ...current, [ruleKey(activeChat)]: 0 }));
+      }
       setError(null);
     } catch (err) {
       setError(String(err));
@@ -131,10 +152,58 @@ export function TelegramSurface({
     try {
       const sent = await invoke<TelegramMessage>("send_telegram_message", {
         chatId: activeChat.id,
+        topicId: activeChat.topic_id ?? null,
+        replyToMessageId: replyTo?.id ?? null,
         text,
       });
       setMessages((current) => upsertMessages([...current, sent]));
       setDraft("");
+      setReplyTo(null);
+      setError(null);
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
+  const markRead = async (chatId: string, messageIds: string[]) => {
+    if (messageIds.length === 0) return;
+    try {
+      await invoke("mark_telegram_messages_read", { chatId, messageIds });
+    } catch {
+      // Read markers are best-effort; message viewing should not fail because of them.
+    }
+  };
+
+  const reactTo = async (message: TelegramMessage) => {
+    const emoji = window.prompt("Reaction emoji", "👍")?.trim();
+    if (!emoji) return;
+    try {
+      await invoke("react_to_telegram_message", { chatId: message.chat_id, messageId: message.id, emoji });
+      await refreshMessages();
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
+  const forwardMessage = async (message: TelegramMessage) => {
+    const options = allowedChats.map((chat) => `${ruleKey(chat)} ${ruleTitle(chat)}`).join("\n");
+    const targetKey = window.prompt(`Forward to allowed chat key:\n${options}`, activeChat ? ruleKey(activeChat) : "");
+    if (!targetKey) return;
+    const target = allowedChats.find((chat) => ruleKey(chat) === targetKey.trim());
+    if (!target) {
+      setError("Forward target is not in the allowlist");
+      return;
+    }
+    try {
+      const forwarded = await invoke<TelegramMessage[]>("forward_telegram_message", {
+        chatId: target.id,
+        topicId: target.topic_id ?? null,
+        fromChatId: message.chat_id,
+        messageId: message.id,
+      });
+      if (target.id === activeChat?.id && (target.topic_id ?? null) === (activeChat.topic_id ?? null)) {
+        setMessages((current) => upsertMessages([...current, ...forwarded]));
+      }
       setError(null);
     } catch (err) {
       setError(String(err));
@@ -172,8 +241,8 @@ export function TelegramSurface({
   };
 
   return (
-    <section className="grid h-full grid-cols-[300px_1fr]">
-      <aside className="min-h-0 border-r border-line">
+    <section className="grid h-full grid-cols-[300px_1fr] overflow-hidden">
+      <aside className="grid min-h-0 grid-rows-[auto_1fr] border-r border-line">
         <div className="border-b border-line px-6 py-5">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="font-mono text-xl font-semibold uppercase">Telegram</h2>
@@ -193,19 +262,27 @@ export function TelegramSurface({
             </div>
           ) : (
             <div className="space-y-2">
-              {allowedChats.map((chat) => (
+              {allowedChats.map((chat) => {
+                const key = ruleKey(chat);
+                const unread = unreadByChat[key] ?? 0;
+                return (
                 <button
-                  key={chat.id}
-                  className={`telegram-chat-select ${activeChat?.id === chat.id ? "telegram-chat-select-active" : ""}`}
-                  onClick={() => setActiveChatId(chat.id)}
+                  key={key}
+                  className={`telegram-chat-select ${activeChat && ruleKey(activeChat) === key ? "telegram-chat-select-active" : ""}`}
+                  onClick={() => {
+                    setActiveChatKey(key);
+                    setUnreadByChat((current) => ({ ...current, [key]: 0 }));
+                  }}
                 >
                   <MessageCircle size={16} />
                   <span className="min-w-0">
-                    <span className="block truncate">{chat.title}</span>
+                    <span className="block truncate">{ruleTitle(chat)}</span>
                     <small className="block truncate">{chat.id}</small>
                   </span>
+                  {unread > 0 && <span className="telegram-unread">{unread}</span>}
                 </button>
-              ))}
+              );
+              })}
             </div>
           )}
         </div>
@@ -215,7 +292,7 @@ export function TelegramSurface({
         <header className="border-b border-line px-6 py-5">
           <div className="flex items-center justify-between gap-4">
             <div className="min-w-0">
-              <div className="truncate font-mono text-xl font-semibold uppercase">{activeChat?.title ?? "No Chat Selected"}</div>
+              <div className="truncate font-mono text-xl font-semibold uppercase">{activeChat ? ruleTitle(activeChat) : "No Chat Selected"}</div>
               <div className="mt-1 truncate font-mono text-xs text-muted">{activeChat?.id ?? "Allowlist is empty"}</div>
             </div>
             <button className="secondary-action" onClick={() => refreshMessages()} disabled={!status.connected || !activeChat}>
@@ -230,7 +307,7 @@ export function TelegramSurface({
           )}
         </header>
 
-        <main className="min-h-0 overflow-auto px-6 py-5">
+        <main className="telegram-message-scroll">
           {!status.connected ? (
             <AuthPanel
               config={config}
@@ -258,10 +335,30 @@ export function TelegramSurface({
             <div className="space-y-3">
               {messages.map((message) => (
                 <div key={message.id} className={`telegram-message ${message.outgoing ? "telegram-message-outgoing" : ""}`}>
+                  {message.forward_label && <div className="mb-1 font-mono text-[11px] uppercase text-muted">{message.forward_label}</div>}
+                  {message.reply_to_message_id && <div className="telegram-reply-ref">Reply to {message.reply_to_message_id}</div>}
                   <div className="mb-1 font-mono text-[11px] uppercase text-muted">
                     {message.outgoing ? "You" : message.sender}
                   </div>
+                  {message.media && (
+                    <div className="telegram-media">
+                      <span>{message.media.kind}</span>
+                      <small>{message.media.file_name ?? message.media.mime_type ?? `file ${message.media.file_id ?? ""}`}</small>
+                    </div>
+                  )}
                   <div className="whitespace-pre-wrap text-sm leading-6">{message.text || "[Unsupported message]"}</div>
+                  {message.reactions.length > 0 && <div className="telegram-reactions">{message.reactions.join("  ")}</div>}
+                  <div className="telegram-message-actions">
+                    <button className="icon-button" onClick={() => setReplyTo(message)} title="Reply">
+                      <CornerUpLeft size={14} />
+                    </button>
+                    <button className="icon-button" onClick={() => forwardMessage(message)} title="Forward">
+                      <Forward size={14} />
+                    </button>
+                    <button className="icon-button" onClick={() => reactTo(message)} title="React">
+                      <Smile size={14} />
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -269,6 +366,12 @@ export function TelegramSurface({
         </main>
 
         <footer className="border-t border-line p-4">
+          {replyTo && (
+            <div className="mb-2 flex items-center justify-between border border-line bg-[#121212] px-3 py-2 text-sm text-[#a8a8a8]">
+              <span className="truncate">Replying to {replyTo.text || replyTo.id}</span>
+              <button onClick={() => setReplyTo(null)}>Cancel</button>
+            </div>
+          )}
           <div className="flex gap-2">
             <textarea
               className="telegram-compose"
@@ -415,4 +518,16 @@ function parseApiId(value: string) {
   if (!trimmed) return null;
   if (!/^\d+$/.test(trimmed)) return null;
   return Number(trimmed);
+}
+
+function ruleKey(chat: Pick<Config["telegram"]["work_allowed_chats"][number], "id" | "topic_id">) {
+  return `${chat.id}:${chat.topic_id ?? "chat"}`;
+}
+
+function messageKey(message: Pick<TelegramMessage, "chat_id" | "topic_id">) {
+  return `${message.chat_id}:${message.topic_id ?? "chat"}`;
+}
+
+function ruleTitle(chat: Pick<Config["telegram"]["work_allowed_chats"][number], "title" | "topic_title">) {
+  return chat.topic_title ? `${chat.title} / ${chat.topic_title}` : chat.title;
 }

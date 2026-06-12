@@ -118,6 +118,56 @@ button:disabled {
   color: #666;
 }
 
+.rules-panels {
+  display: flex;
+  height: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.rule-panel-shell {
+  display: flex;
+  min-height: 0;
+  border-right: 1px solid #2a2a2a;
+  background: #0e0e0e;
+}
+
+.rule-panel-collapsed {
+  flex: 0 0 52px;
+}
+
+.rule-panel-expanded {
+  flex: 0 0 min(980px, calc(100vw - 180px));
+}
+
+.rule-panel-tab {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  min-height: 100%;
+  border-right: 1px solid #2a2a2a;
+  color: #d0d0d0;
+  background: #111;
+  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.rule-panel-tab span {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+}
+
+.rule-panel-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.rule-panel-body > section {
+  height: 100%;
+}
+
 .search-field input,
 .domain-input,
 .script-input,
@@ -172,6 +222,13 @@ button:disabled {
   padding: 12px;
   color: #f0f0f0;
   line-height: 1.4;
+}
+
+.telegram-message-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 20px 24px;
 }
 
 .app-row,
@@ -263,6 +320,12 @@ button:disabled {
   font-size: 13px;
 }
 
+.domain-row span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .telegram-chat-row,
 .telegram-toggle-row {
   justify-content: space-between;
@@ -309,6 +372,19 @@ button:disabled {
   font-size: 11px;
 }
 
+.telegram-unread {
+  display: grid;
+  place-items: center;
+  min-width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: #e63946;
+  color: #0e0e0e;
+  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .telegram-message {
   max-width: min(680px, 86%);
   border: 1px solid #2a2a2a;
@@ -320,6 +396,38 @@ button:disabled {
   margin-left: auto;
   border-color: rgba(46, 196, 182, 0.55);
   background: #10211f;
+}
+
+.telegram-media,
+.telegram-reply-ref,
+.telegram-reactions,
+.telegram-message-actions {
+  border-top: 1px solid #2a2a2a;
+  margin-top: 8px;
+  padding-top: 8px;
+}
+
+.telegram-media {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: #d0d0d0;
+  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.telegram-media small,
+.telegram-reply-ref,
+.telegram-reactions {
+  color: #8b8b8b;
+  font-family: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.telegram-message-actions {
+  display: flex;
+  gap: 6px;
 }
 
 .select-row {
