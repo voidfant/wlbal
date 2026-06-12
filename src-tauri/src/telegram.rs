@@ -8,12 +8,12 @@ use std::{
     ffi::{c_char, c_double, c_int, CStr, CString},
     fs,
     path::{Path, PathBuf},
-    process::Command,
     sync::{mpsc, Arc, Mutex},
     thread,
     time::Duration,
 };
 use tauri::{AppHandle, Emitter};
+use tauri_plugin_notification::NotificationExt;
 
 type TdCreateClientId = unsafe extern "C" fn() -> c_int;
 type TdSend = unsafe extern "C" fn(c_int, *const c_char);
@@ -619,7 +619,7 @@ fn handle_update(
         if value.get("@type").and_then(Value::as_str) == Some("updateNewMessage") {
             if let Some(message) = value.get("message").and_then(parse_message) {
                 if !message.outgoing {
-                    show_notification(&format!("New Telegram message: {}", preview_text(&message)));
+                    show_notification(&app, &format!("New Telegram message: {}", preview_text(&message)));
                 }
                 let _ = app.emit("telegram-message", &message);
             }
@@ -1042,10 +1042,11 @@ fn preview_text(message: &TelegramMessage) -> String {
     }
 }
 
-fn show_notification(message: &str) {
-    let script = format!(
-        "display notification \"{}\" with title \"wlbal Telegram\"",
-        message.replace('\\', "\\\\").replace('"', "\\\"")
-    );
-    let _ = Command::new("osascript").args(["-e", &script]).status();
+fn show_notification(app: &tauri::AppHandle, message: &str) {
+    app.notification()
+        .builder()
+        .title("wlbal Telegram")
+        .body(message)
+        .show()
+        .unwrap();
 }

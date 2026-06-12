@@ -14,6 +14,7 @@ use std::{
 };
 use tauri::{AppHandle, Emitter};
 use tokio::{sync::RwLock, time::{interval, Duration}};
+use tauri_plugin_notification::NotificationExt;
 
 const HOSTS_START: &str = "# wlbal-block-start";
 const HOSTS_END: &str = "# wlbal-block-end";
@@ -200,7 +201,7 @@ async fn enforce_apps(config: &Config, phase: Phase, installed: &[AppInfo], app:
             }
 
             if config.notifications {
-                show_notification(&format!("{} is blocked during {:?} time.", info.name, phase));
+                show_notification(&app, &format!("{} is blocked during {:?} time.", info.name, phase));
             }
             if config.log_blocked_attempts {
                 append_log(
@@ -241,7 +242,7 @@ async fn enforce_browser_urls(config: &Config, phase: Phase, domains: &[String],
 
     for attempt in attempts {
         if config.notifications {
-            show_notification(&format!(
+            show_notification(&app, &format!(
                 "{} is blocked during {:?} time.",
                 attempt.domain, phase
             ));
@@ -855,12 +856,13 @@ fn run_admin_script(script: &str) -> Result<(), String> {
         .and_then(|status| if status.success() { Ok(()) } else { Err(format!("osascript exited with {status}")) })
 }
 
-fn show_notification(message: &str) {
-    let script = format!(
-        "display notification \"{}\" with title \"wlbal\"",
-        message.replace('\\', "\\\\").replace('"', "\\\"")
-    );
-    let _ = Command::new("osascript").args(["-e", &script]).status();
+fn show_notification(app: &tauri::AppHandle, message: &str) {
+    app.notification()
+        .builder()
+        .title("wlbal")
+        .body(message)
+        .show()
+        .unwrap();
 }
 
 fn app_search_dirs() -> Vec<PathBuf> {

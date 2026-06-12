@@ -12,6 +12,7 @@ import { TelegramSurface } from "./components/TelegramSurface";
 import { Timer } from "./components/Timer";
 import { WebManager } from "./components/WebManager";
 import { TimerState, useTimer } from "./hooks/useTimer";
+import { isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
 
 export type AppInfo = {
   name: string;
@@ -128,7 +129,14 @@ export default function App() {
     invoke<Config>("get_config").then(setConfig).catch((err) => setError(String(err)));
     invoke<boolean>("get_enforcement_enabled").then(setEnforcementEnabled).catch(() => undefined);
     invoke<AppInfo[]>("get_installed_apps").then(setInstalledApps).catch(() => undefined);
+    async function initNotifications() {
+      const granted = await isPermissionGranted();
 
+      if (!granted) {
+        await requestPermission();
+      }
+    }
+    initNotifications();
     const configChanged = listen<Config>("config-changed", (event) => setConfig(event.payload));
     const appError = listen<string>("wlbal-error", (event) => setError(event.payload));
     return () => {
