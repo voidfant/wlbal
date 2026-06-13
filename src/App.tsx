@@ -1,12 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Check, Clock3, ListChecks, MessageCircle, Play, Settings as SettingsIcon, Shield, Terminal, type LucideIcon } from "lucide-react";
+import { BarChart3, Check, Clock3, ListChecks, MessageCircle, Play, Settings as SettingsIcon, Shield, Terminal, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { AppManager } from "./components/AppManager";
 import { PhaseIndicator } from "./components/PhaseIndicator";
 import { Settings } from "./components/Settings";
+import { Stats } from "./components/Stats";
 import { TelegramManager } from "./components/TelegramManager";
 import { TelegramSurface } from "./components/TelegramSurface";
 import { Timer } from "./components/Timer";
@@ -67,10 +68,11 @@ export type Config = {
   };
 };
 
-type Tab = "timer" | "rules" | "telegram" | "settings";
+type Tab = "timer" | "stats" | "rules" | "telegram" | "settings";
 
 const allTabs: Array<{ id: Tab; label: string; icon: LucideIcon }> = [
   { id: "timer", label: "Timer", icon: Clock3 },
+  { id: "stats", label: "Stats", icon: BarChart3 },
   { id: "rules", label: "Rules", icon: ListChecks },
   { id: "telegram", label: "Telegram", icon: MessageCircle },
   { id: "settings", label: "Settings", icon: SettingsIcon },
@@ -280,6 +282,8 @@ export default function App() {
             />
           ) : tab === "timer" ? (
             <Timer state={state} config={config} />
+          ) : tab === "stats" ? (
+            <Stats state={state} />
           ) : tab === "rules" ? (
             <Rules
               config={config}

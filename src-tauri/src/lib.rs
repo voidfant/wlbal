@@ -6,9 +6,15 @@ mod telegram;
 mod timer;
 mod tray;
 
-use config::Config;
+use config::{Config, StatusLogEntry};
 use serde::Serialize;
-use std::{env, path::Path, process::Command, sync::Arc};
+use std::{
+    env,
+    path::Path,
+    process::Command,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tauri::State;
 use telegram::{TelegramBridge, TelegramChatSummary, TelegramConnectionStatus, TelegramDownloadedFile, TelegramMessage, TelegramTopicSummary};
 use timer::{Phase, TimerHandle, TimerSnapshot};
@@ -36,6 +42,11 @@ async fn get_state(state: State<'_, AppState>) -> Result<TimerSnapshot, String> 
 #[tauri::command]
 async fn get_config(state: State<'_, AppState>) -> Result<Config, String> {
     Ok(state.config.read().await.clone())
+}
+
+#[tauri::command]
+fn get_status_events(start: String, end: String) -> Vec<StatusLogEntry> {
+    config::read_status_log_window(&start, &end)
 }
 
 #[tauri::command]
@@ -342,6 +353,45 @@ fn open_telegram_media(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn stage_telegram_media_bytes(file_name: Option<String>, bytes: Vec<u8>) -> Result<String, String> {
+    if bytes.is_empty() {
+        return Err("Clipboard media is empty".into());
+    }
+    let upload_dir = config::config_dir().join("telegram").join("uploads");
+    std::fs::create_dir_all(&upload_dir)
+        .map_err(|err| format!("Failed to prepare Telegram uploads: {err}"))?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| err.to_string())?
+        .as_millis();
+    let name = sanitize_upload_name(file_name.as_deref().unwrap_or("pasted-media"));
+    let path = upload_dir.join(format!("{timestamp}-{name}"));
+    std::fs::write(&path, bytes)
+        .map_err(|err| format!("Failed to stage Telegram media: {err}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+fn sanitize_upload_name(name: &str) -> String {
+    let sanitized = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if sanitized.is_empty() {
+        "pasted-media".into()
+    } else {
+        sanitized
+    }
+}
+
 fn dir_stats(path: &Path) -> (u64, u64) {
     let Ok(entries) = std::fs::read_dir(path) else {
         return (0, 0);
@@ -381,6 +431,26 @@ async fn send_telegram_message(chat_id: String, topic_id: Option<i64>, reply_to_
 
     let bridge = state.telegram.clone();
     tokio::task::spawn_blocking(move || bridge.send_message(chat_id, topic_id, reply_to_message_id, text))
+        .await
+        .map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
+async fn send_telegram_media(chat_id: String, topic_id: Option<i64>, reply_to_message_id: Option<String>, file_paths: Vec<String>, caption: String, state: State<'_, AppState>) -> Result<Vec<TelegramMessage>, String> {
+    let allowed = state
+        .config
+        .read()
+        .await
+        .telegram
+        .work_allowed_chats
+        .iter()
+        .any(|chat| chat.id == chat_id && (chat.topic_id.is_none() || chat.topic_id == topic_id));
+    if !allowed {
+        return Err("This chat is not allowed in wlbal".into());
+    }
+
+    let bridge = state.telegram.clone();
+    tokio::task::spawn_blocking(move || bridge.send_media(chat_id, topic_id, reply_to_message_id, file_paths, caption))
         .await
         .map_err(|err| err.to_string())?
 }
@@ -483,6 +553,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -501,6 +572,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_state,
             get_config,
+            get_status_events,
             save_config,
             get_enforcement_enabled,
             set_enforcement_enabled,
@@ -522,7 +594,9 @@ pub fn run() {
             download_telegram_media,
             clear_telegram_downloads,
             open_telegram_media,
+            stage_telegram_media_bytes,
             send_telegram_message,
+            send_telegram_media,
             forward_telegram_message,
             react_to_telegram_message,
             mark_telegram_messages_read,

@@ -423,17 +423,7 @@ impl TelegramBridge {
     }
 
     pub fn send_message(&self, chat_id: String, topic_id: Option<i64>, reply_to_message_id: Option<String>, text: String) -> Result<TelegramMessage, String> {
-        let reply_to = reply_to_message_id
-            .and_then(|id| id.parse::<i64>().ok())
-            .map(|message_id| {
-                json!({
-                    "@type": "inputMessageReplyToMessage",
-                    "message_id": message_id,
-                    "quote": null,
-                    "checklist_task_id": 0,
-                    "poll_option_id": "",
-                })
-            });
+        let reply_to = reply_to_message(reply_to_message_id);
         let response = self.request(json!({
             "@type": "sendMessage",
             "chat_id": chat_id,
@@ -459,6 +449,66 @@ impl TelegramBridge {
             message.reply_to_sender = self.resolve_message_sender_name(&message.chat_id, &reply_id, &mut names);
         }
         Ok(message)
+    }
+
+    pub fn send_media(
+        &self,
+        chat_id: String,
+        topic_id: Option<i64>,
+        reply_to_message_id: Option<String>,
+        file_paths: Vec<String>,
+        caption: String,
+    ) -> Result<Vec<TelegramMessage>, String> {
+        let mut paths = Vec::new();
+        for path in file_paths {
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let canonical = Path::new(trimmed)
+                .canonicalize()
+                .map_err(|err| format!("Media file is not available: {err}"))?;
+            if !canonical.is_file() {
+                return Err(format!("Media path is not a file: {}", canonical.to_string_lossy()));
+            }
+            paths.push(canonical);
+        }
+        if paths.is_empty() {
+            return Err("Select at least one file to send".into());
+        }
+        if paths.len() > 10 {
+            return Err("Telegram albums can include up to 10 files".into());
+        }
+
+        let force_document = paths.len() > 1 && paths.iter().any(|path| !is_album_media(path));
+        let contents = paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| input_media_content(path, if index == 0 { &caption } else { "" }, force_document))
+            .collect::<Vec<_>>();
+        let reply_to = reply_to_message(reply_to_message_id);
+        let response = if contents.len() == 1 {
+            self.request(json!({
+                "@type": "sendMessage",
+                "chat_id": chat_id,
+                "topic_id": topic_id.map(|id| json!({ "@type": "messageTopicForum", "forum_topic_id": id })),
+                "reply_to": reply_to,
+                "input_message_content": contents.into_iter().next().unwrap(),
+            }))?
+        } else {
+            self.request(json!({
+                "@type": "sendMessageAlbum",
+                "chat_id": chat_id,
+                "topic_id": topic_id.map(|id| json!({ "@type": "messageTopicForum", "forum_topic_id": id })),
+                "reply_to": reply_to,
+                "input_message_contents": contents,
+            }))?
+        };
+
+        if let Some(messages) = response.get("messages").and_then(Value::as_array) {
+            return Ok(self.parse_messages(messages));
+        }
+        Ok(self.parse_messages(std::slice::from_ref(&response)))
     }
 
     pub fn forward_message(&self, chat_id: String, topic_id: Option<i64>, from_chat_id: String, message_id: String) -> Result<Vec<TelegramMessage>, String> {
@@ -1071,6 +1121,111 @@ fn tdlib_parameters(api_id: i32, api_hash: &str, database_dir: &Path, files_dir:
         "enable_storage_optimizer": true,
         "ignore_file_names": false,
     })
+}
+
+fn reply_to_message(reply_to_message_id: Option<String>) -> Option<Value> {
+    reply_to_message_id
+        .and_then(|id| id.parse::<i64>().ok())
+        .map(|message_id| {
+            json!({
+                "@type": "inputMessageReplyToMessage",
+                "message_id": message_id,
+                "quote": null,
+                "checklist_task_id": 0,
+                "poll_option_id": "",
+            })
+        })
+}
+
+fn input_media_content(path: &Path, caption: &str, force_document: bool) -> Value {
+    if !force_document && is_photo_path(path) {
+        return json!({
+            "@type": "inputMessagePhoto",
+            "photo": {
+                "@type": "inputPhoto",
+                "photo": input_file_local(path),
+                "thumbnail": null,
+                "video": null,
+                "added_sticker_file_ids": [],
+                "width": 0,
+                "height": 0,
+            },
+            "caption": formatted_text(caption),
+            "show_caption_above_media": false,
+            "self_destruct_type": null,
+            "has_spoiler": false,
+        });
+    }
+    if !force_document && is_video_path(path) {
+        return json!({
+            "@type": "inputMessageVideo",
+            "video": {
+                "@type": "inputVideo",
+                "video": input_file_local(path),
+                "thumbnail": null,
+                "cover": null,
+                "start_timestamp": 0,
+                "added_sticker_file_ids": [],
+                "duration": 0,
+                "width": 0,
+                "height": 0,
+                "supports_streaming": true,
+            },
+            "caption": formatted_text(caption),
+            "show_caption_above_media": false,
+            "self_destruct_type": null,
+            "has_spoiler": false,
+        });
+    }
+    json!({
+        "@type": "inputMessageDocument",
+        "document": {
+            "@type": "inputDocument",
+            "document": input_file_local(path),
+            "thumbnail": null,
+            "disable_content_type_detection": false,
+        },
+        "caption": formatted_text(caption),
+    })
+}
+
+fn input_file_local(path: &Path) -> Value {
+    json!({
+        "@type": "inputFileLocal",
+        "path": path.to_string_lossy(),
+    })
+}
+
+fn formatted_text(text: &str) -> Value {
+    json!({
+        "@type": "formattedText",
+        "text": text,
+        "entities": [],
+    })
+}
+
+fn is_album_media(path: &Path) -> bool {
+    is_photo_path(path) || is_video_path(path)
+}
+
+fn is_photo_path(path: &Path) -> bool {
+    matches!(
+        path_extension(path).as_deref(),
+        Some("jpg" | "jpeg" | "png" | "webp" | "gif" | "heic" | "heif")
+    )
+}
+
+fn is_video_path(path: &Path) -> bool {
+    matches!(
+        path_extension(path).as_deref(),
+        Some("mp4" | "mov" | "m4v" | "webm" | "mkv" | "avi")
+    )
+}
+
+fn path_extension(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
 }
 
 fn response_error(value: &Value, fallback: &str) -> String {

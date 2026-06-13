@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
     env,
@@ -172,6 +172,20 @@ pub struct AuditLogEntry {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusLogEntry {
+    pub timestamp: String,
+    pub phase: String,
+    pub paused: bool,
+    pub override_active: bool,
+    #[serde(default = "default_status_active")]
+    pub active: bool,
+}
+
+fn default_status_active() -> bool {
+    false
+}
+
 pub fn config_dir() -> PathBuf {
     if let Ok(home) = env::var("HOME") {
         return Path::new(&home).join(".config").join("wlbal");
@@ -185,6 +199,10 @@ pub fn config_path() -> PathBuf {
 
 pub fn log_path() -> PathBuf {
     config_dir().join("log.json")
+}
+
+pub fn status_log_path() -> PathBuf {
+    config_dir().join("status-log.json")
 }
 
 pub fn load_or_create_config() -> io::Result<Config> {
@@ -234,6 +252,68 @@ pub fn append_log(kind: &str, message: impl Into<String>) {
     if let Ok(raw) = serde_json::to_string_pretty(&entries) {
         let _ = fs::write(path, raw);
     }
+}
+
+pub fn append_status_log(phase: &str, paused: bool, override_active: bool, active: bool) {
+    let _ = fs::create_dir_all(config_dir());
+    let path = status_log_path();
+    let mut entries = read_all_status_log_entries();
+
+    entries.push(StatusLogEntry {
+        timestamp: Utc::now().to_rfc3339(),
+        phase: phase.to_string(),
+        paused,
+        override_active,
+        active,
+    });
+
+    if entries.len() > 20000 {
+        entries.drain(0..entries.len() - 20000);
+    }
+
+    if let Ok(raw) = serde_json::to_string_pretty(&entries) {
+        let _ = fs::write(path, raw);
+    }
+}
+
+pub fn read_status_log_window(start: &str, end: &str) -> Vec<StatusLogEntry> {
+    let Ok(start_at) = DateTime::parse_from_rfc3339(start).map(|date| date.with_timezone(&Utc)) else {
+        return Vec::new();
+    };
+    let Ok(end_at) = DateTime::parse_from_rfc3339(end).map(|date| date.with_timezone(&Utc)) else {
+        return Vec::new();
+    };
+
+    let mut previous = None;
+    let mut window = Vec::new();
+    for entry in read_all_status_log_entries() {
+        let Ok(timestamp) = DateTime::parse_from_rfc3339(&entry.timestamp).map(|date| date.with_timezone(&Utc)) else {
+            continue;
+        };
+        if timestamp < start_at {
+            previous = Some(entry);
+        } else if timestamp <= end_at {
+            window.push(entry);
+        }
+    }
+
+    if let Some(entry) = previous {
+        window.insert(0, entry);
+    }
+
+    window
+}
+
+fn read_all_status_log_entries() -> Vec<StatusLogEntry> {
+    let path = status_log_path();
+    if !path.exists() {
+        return Vec::new();
+    }
+
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Vec<StatusLogEntry>>(&raw).ok())
+        .unwrap_or_default()
 }
 
 fn modified(path: &Path) -> Option<SystemTime> {

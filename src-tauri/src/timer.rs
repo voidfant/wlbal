@@ -5,6 +5,8 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::{sync::RwLock, time::{interval, Duration}};
 
+const STATUS_HEARTBEAT_SECS: i64 = 5 * 60;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub enum Phase {
@@ -17,6 +19,13 @@ impl Phase {
         match self {
             Phase::Work => Phase::Leisure,
             Phase::Leisure => Phase::Work,
+        }
+    }
+
+    pub fn as_status_label(self) -> &'static str {
+        match self {
+            Phase::Work => "Work",
+            Phase::Leisure => "Leisure",
         }
     }
 }
@@ -65,8 +74,10 @@ struct TimerInner {
     total_secs: u64,
     session_count: u32,
     paused: bool,
+    active: bool,
     started_at: DateTime<Utc>,
     last_tick_at: DateTime<Utc>,
+    last_status_log_at: DateTime<Utc>,
     override_resume: Option<OverrideResume>,
 }
 
@@ -80,17 +91,21 @@ impl TimerHandle {
     pub fn new(config: Arc<RwLock<Config>>, initial_config: &Config) -> Self {
         let initial = duration_for_phase(initial_config, Phase::Work, 0);
         let now = Utc::now();
+        let inner = TimerInner {
+            phase: Phase::Work,
+            remaining_secs: initial,
+            total_secs: initial,
+            session_count: 0,
+            paused: true,
+            active: false,
+            started_at: now,
+            last_tick_at: now,
+            last_status_log_at: now,
+            override_resume: None,
+        };
+        append_status(&inner);
         Self {
-            inner: Arc::new(RwLock::new(TimerInner {
-                phase: Phase::Work,
-                remaining_secs: initial,
-                total_secs: initial,
-                session_count: 0,
-                paused: true,
-                started_at: now,
-                last_tick_at: now,
-                override_resume: None,
-            })),
+            inner: Arc::new(RwLock::new(inner)),
             config,
         }
     }
@@ -132,9 +147,12 @@ impl TimerHandle {
         inner.remaining_secs = capped;
         inner.total_secs = capped;
         inner.paused = false;
-        inner.started_at = Utc::now();
+        inner.active = true;
+        let now = Utc::now();
+        inner.started_at = now;
         inner.last_tick_at = inner.started_at;
         inner.override_resume = Some(resume);
+        record_status(&mut inner, now);
 
         Ok(SwitchResult {
             ok: true,
@@ -146,15 +164,19 @@ impl TimerHandle {
 
     pub async fn pause(&self) {
         let mut inner = self.inner.write().await;
+        let now = Utc::now();
         inner.paused = true;
-        inner.last_tick_at = Utc::now();
+        inner.last_tick_at = now;
+        record_status(&mut inner, now);
         append_log("admin_override", "Timer paused via CLI");
     }
 
     pub async fn resume(&self) {
         let mut inner = self.inner.write().await;
+        let now = Utc::now();
         inner.paused = false;
-        inner.last_tick_at = Utc::now();
+        inner.last_tick_at = now;
+        record_status(&mut inner, now);
         append_log("admin_override", "Timer resumed via CLI");
     }
 
@@ -175,9 +197,11 @@ impl TimerHandle {
         inner.total_secs = duration;
         inner.session_count = 0;
         inner.paused = paused;
+        inner.active = !paused;
         inner.started_at = now;
         inner.last_tick_at = now;
         inner.override_resume = None;
+        record_status(&mut inner, now);
         snapshot_from_inner(&inner, cfg)
     }
 
@@ -190,6 +214,7 @@ impl TimerHandle {
         inner.started_at = now;
         inner.last_tick_at = now;
         inner.override_resume = None;
+        record_status(&mut inner, now);
         snapshot_from_inner(&inner, cfg)
     }
 }
@@ -226,6 +251,7 @@ fn advance_inner(
 ) {
     if inner.paused {
         inner.last_tick_at = now;
+        maybe_record_status(inner, now);
         return;
     }
 
@@ -246,6 +272,7 @@ fn advance_inner(
             complete_current_phase(inner, cfg, "schedule", phase_events);
         }
     }
+    maybe_record_status(inner, now);
 }
 
 fn complete_current_phase(
@@ -283,12 +310,34 @@ fn complete_current_phase(
             }
         }
     }
-    inner.started_at = Utc::now();
+    let now = Utc::now();
+    inner.started_at = now;
     inner.last_tick_at = inner.started_at;
+    record_status(inner, now);
     phase_events.push(PhaseChangedPayload {
         new_phase: inner.phase,
         triggered_by: trigger.to_string(),
     });
+}
+
+fn maybe_record_status(inner: &mut TimerInner, now: DateTime<Utc>) {
+    if (now - inner.last_status_log_at).num_seconds() >= STATUS_HEARTBEAT_SECS {
+        record_status(inner, now);
+    }
+}
+
+fn record_status(inner: &mut TimerInner, now: DateTime<Utc>) {
+    append_status(inner);
+    inner.last_status_log_at = now;
+}
+
+fn append_status(inner: &TimerInner) {
+    crate::config::append_status_log(
+        inner.phase.as_status_label(),
+        inner.paused,
+        inner.override_resume.is_some(),
+        inner.active,
+    );
 }
 
 fn snapshot_from_inner(inner: &TimerInner, cfg: &Config) -> TimerSnapshot {

@@ -1,6 +1,7 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { CornerUpLeft, Download, ExternalLink, Forward, Lock, MessageCircle, RefreshCw, Search, Send, X } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { CornerUpLeft, Download, ExternalLink, Forward, Lock, MessageCircle, Paperclip, RefreshCw, Search, Send, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Config } from "../App";
 
@@ -51,6 +52,10 @@ type TelegramDownloadedFile = {
   size?: number | null;
 };
 
+type FileWithPath = File & { path?: string };
+
+const maxAttachments = 10;
+
 const defaultStatus: TelegramStatus = {
   enabled: false,
   connected: false,
@@ -78,6 +83,9 @@ export function TelegramSurface({
   const [hasOlderMessages, setHasOlderMessages] = useState(true);
   const [unreadByChat, setUnreadByChat] = useState<Record<string, number>>({});
   const [draft, setDraft] = useState("");
+  const [attachments, setAttachments] = useState<string[]>([]);
+  const [dragActive, setDragActive] = useState(false);
+  const [sending, setSending] = useState(false);
   const [replyTo, setReplyTo] = useState<TelegramMessage | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -269,22 +277,125 @@ export function TelegramSurface({
 
   const sendMessage = async () => {
     const text = draft.trim();
-    if (!activeChat?.id || !text) return;
+    if (sending || !activeChat?.id || (!text && attachments.length === 0)) return;
+    setSending(true);
     try {
-      const sent = await invoke<TelegramMessage>("send_telegram_message", {
-        chatId: activeChat.id,
-        topicId: activeChat.topic_id ?? null,
-        replyToMessageId: replyTo?.id ?? null,
-        text,
-      });
-      setMessages((current) => upsertMessages([...current, sent]));
+      if (attachments.length > 0) {
+        const sent = await invoke<TelegramMessage[]>("send_telegram_media", {
+          chatId: activeChat.id,
+          topicId: activeChat.topic_id ?? null,
+          replyToMessageId: replyTo?.id ?? null,
+          filePaths: attachments,
+          caption: text,
+        });
+        setMessages((current) => upsertMessages([...current, ...sent]));
+        setAttachments([]);
+      } else {
+        const sent = await invoke<TelegramMessage>("send_telegram_message", {
+          chatId: activeChat.id,
+          topicId: activeChat.topic_id ?? null,
+          replyToMessageId: replyTo?.id ?? null,
+          text,
+        });
+        setMessages((current) => upsertMessages([...current, sent]));
+      }
       queueScrollToBottom();
       setDraft("");
       setReplyTo(null);
       setError(null);
     } catch (err) {
       setError(String(err));
+    } finally {
+      setSending(false);
     }
+  };
+
+  const pickAttachments = async () => {
+    if (!status.connected || !activeChat) return;
+    try {
+      const selected = await open({
+        multiple: true,
+        directory: false,
+        title: "Attach Telegram media",
+      });
+      const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
+      if (paths.length === 0) return;
+      appendAttachments(paths.map(String));
+      composeRef.current?.focus();
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
+  const appendAttachments = (paths: string[]) => {
+    if (paths.length === 0) return;
+    setAttachments((current) => Array.from(new Set([...current, ...paths])).slice(0, maxAttachments));
+  };
+
+  const attachMediaFiles = async (fileList: FileList | File[]) => {
+    if (!status.connected || !activeChat || sending) return;
+    const remainingSlots = maxAttachments - attachments.length;
+    if (remainingSlots <= 0) {
+      setError(`Telegram albums can include up to ${maxAttachments} files`);
+      return;
+    }
+    const files = Array.from(fileList).slice(0, remainingSlots);
+    if (files.length === 0) return;
+    try {
+      const nextPaths: string[] = [];
+      for (const [index, file] of files.entries()) {
+        const path = (file as FileWithPath).path;
+        if (path) {
+          nextPaths.push(path);
+          continue;
+        }
+        const buffer = await file.arrayBuffer();
+        const bytes = Array.from(new Uint8Array(buffer));
+        const staged = await invoke<string>("stage_telegram_media_bytes", {
+          fileName: mediaFileName(file, index),
+          bytes,
+        });
+        nextPaths.push(staged);
+      }
+      appendAttachments(nextPaths);
+      setError(null);
+      composeRef.current?.focus();
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
+  const removeAttachment = (path: string) => {
+    setAttachments((current) => current.filter((candidate) => candidate !== path));
+  };
+
+  const canAttachMedia = status.connected && Boolean(activeChat) && !sending;
+
+  const handleMediaDrag = (event: React.DragEvent<HTMLElement>) => {
+    if (!canAttachMedia || !hasFileDrag(event.dataTransfer)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setDragActive(true);
+  };
+
+  const handleMediaDragLeave = (event: React.DragEvent<HTMLElement>) => {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
+    setDragActive(false);
+  };
+
+  const handleMediaDrop = async (event: React.DragEvent<HTMLElement>) => {
+    if (!hasFileDrag(event.dataTransfer)) return;
+    event.preventDefault();
+    setDragActive(false);
+    await attachMediaFiles(event.dataTransfer.files);
+  };
+
+  const handleMediaPaste = async (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = event.clipboardData.files;
+    if (files.length === 0) return;
+    event.preventDefault();
+    await attachMediaFiles(files);
   };
 
   useEffect(() => {
@@ -508,9 +619,19 @@ export function TelegramSurface({
 
   return (
     <section
-      className="telegram-surface grid overflow-hidden"
+      className={`telegram-surface relative grid overflow-hidden ${dragActive ? "telegram-surface-dragging" : ""}`}
       style={{ gridTemplateColumns: activeGroupHasTopics ? "280px 240px minmax(0, 1fr)" : "300px minmax(0, 1fr)" }}
+      onDragEnter={handleMediaDrag}
+      onDragOver={handleMediaDrag}
+      onDragLeave={handleMediaDragLeave}
+      onDrop={handleMediaDrop}
     >
+      {dragActive && (
+        <div className="telegram-drop-overlay">
+          <Paperclip size={22} />
+          <span>Drop media to attach</span>
+        </div>
+      )}
       <aside className="grid min-h-0 grid-rows-[auto_1fr] border-r border-line">
         <div className="border-b border-line px-6 py-5">
           <div className="mb-4 flex items-center justify-between">
@@ -742,14 +863,31 @@ export function TelegramSurface({
               <button onClick={() => setReplyTo(null)}>Cancel</button>
             </div>
           )}
+          {attachments.length > 0 && (
+            <div className="telegram-attachment-tray">
+              {attachments.map((path) => (
+                <div key={path} className="telegram-attachment-chip" title={path}>
+                  <Paperclip size={13} />
+                  <span>{fileName(path)}</span>
+                  <button onClick={() => removeAttachment(path)} title="Remove attachment">
+                    <X size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="flex gap-2">
+            <button type="button" className="icon-button self-stretch" onClick={pickAttachments} disabled={!status.connected || !activeChat || sending} title="Attach files">
+              <Paperclip size={16} />
+            </button>
             <textarea
               ref={composeRef}
               className="telegram-compose"
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
-              placeholder={status.connected && activeChat ? "Message" : "Connect Telegram first"}
-              disabled={!status.connected || !activeChat}
+              onPaste={handleMediaPaste}
+              placeholder={status.connected && activeChat ? attachments.length > 0 ? "Caption" : "Message" : "Connect Telegram first"}
+              disabled={!status.connected || !activeChat || sending}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
@@ -757,9 +895,9 @@ export function TelegramSurface({
                 }
               }}
             />
-            <button className="primary-action self-stretch" onClick={sendMessage} disabled={!status.connected || !activeChat || !draft.trim()}>
+            <button type="button" className="primary-action self-stretch" onClick={sendMessage} disabled={sending || !status.connected || !activeChat || (!draft.trim() && attachments.length === 0)}>
               <Send size={16} />
-              Send
+              {sending ? "Sending" : "Send"}
             </button>
           </div>
         </footer>
@@ -1010,6 +1148,30 @@ function isPreviewableMedia(media: NonNullable<TelegramMessage["media"]>) {
   return media.kind === "photo" || media.kind === "video";
 }
 
+function hasFileDrag(data: DataTransfer) {
+  return Array.from(data.types).includes("Files");
+}
+
+function mediaFileName(file: File, index: number) {
+  if (file.name.trim()) return file.name;
+  const extension = extensionForMime(file.type);
+  return `pasted-media-${index + 1}.${extension}`;
+}
+
+function extensionForMime(mimeType: string) {
+  const normalized = mimeType.toLowerCase();
+  if (normalized === "image/jpeg") return "jpg";
+  if (normalized === "image/png") return "png";
+  if (normalized === "image/gif") return "gif";
+  if (normalized === "image/webp") return "webp";
+  if (normalized === "video/mp4") return "mp4";
+  if (normalized === "video/quicktime") return "mov";
+  if (normalized === "audio/mpeg") return "mp3";
+  if (normalized === "audio/wav") return "wav";
+  if (normalized === "application/pdf") return "pdf";
+  return "bin";
+}
+
 function formatBytes(bytes: number) {
   if (!Number.isFinite(bytes) || bytes <= 0) return "";
   const units = ["B", "KB", "MB", "GB"];
@@ -1020,4 +1182,8 @@ function formatBytes(bytes: number) {
     unitIndex += 1;
   }
   return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function fileName(path: string) {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 }
