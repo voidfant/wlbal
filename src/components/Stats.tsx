@@ -184,10 +184,10 @@ export function Stats({ state }: { state: TimerState }) {
       </header>
 
       <div className="stats-total-grid">
-        <StatBlock label="Work phase" value={formatDuration(totals.workMs)} detail={`${formatDuration(totals.workActiveMs)} active`} tone="work" />
-        <StatBlock label="Leisure phase" value={formatDuration(totals.leisureMs)} detail={`${formatDuration(totals.leisureActiveMs)} active`} tone="leisure" />
-        <StatBlock label="Pause in work" value={formatDuration(totals.workPauseMs)} detail={percent(totals.workPauseMs, totals.workMs)} tone="workPause" />
-        <StatBlock label="Pause in leisure" value={formatDuration(totals.leisurePauseMs)} detail={percent(totals.leisurePauseMs, totals.leisureMs)} tone="leisurePause" />
+        <StatBlock label="Work phase" value={formatDuration(totals.workMs)} detail="Active work time" tone="work" />
+        <StatBlock label="Leisure phase" value={formatDuration(totals.leisureMs)} detail="Active leisure time" tone="leisure" />
+        <StatBlock label="Pause in work" value={formatDuration(totals.workPauseMs)} detail={percent(totals.workPauseMs, totals.observedMs)} tone="workPause" />
+        <StatBlock label="Pause in leisure" value={formatDuration(totals.leisurePauseMs)} detail={percent(totals.leisurePauseMs, totals.observedMs)} tone="leisurePause" />
       </div>
 
       <div className="stats-body">
@@ -372,17 +372,17 @@ function addDuration(totals: Totals, event: StatusEvent, duration: number) {
   if (!event.active) return;
   totals.observedMs += duration;
   if (event.phase === "Work") {
-    totals.workMs += duration;
     if (event.paused) {
       totals.workPauseMs += duration;
     } else {
+      totals.workMs += duration;
       totals.workActiveMs += duration;
     }
   } else {
-    totals.leisureMs += duration;
     if (event.paused) {
       totals.leisurePauseMs += duration;
     } else {
+      totals.leisureMs += duration;
       totals.leisureActiveMs += duration;
     }
   }
@@ -465,6 +465,6 @@ function formatDuration(ms: number) {
 }
 
 function percent(value: number, total: number) {
-  if (total <= 0 || value <= 0) return "0% of phase";
-  return `${Math.round((value / total) * 100)}% of phase`;
+  if (total <= 0 || value <= 0) return "0% of observed";
+  return `${Math.round((value / total) * 100)}% of observed`;
 }
